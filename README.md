@@ -6,11 +6,13 @@
 
 A single-file budget tracker for South African bank statements. Reads CSVs you email to yourself, classifies them with simple rules, and shows you how the current pay cycle is tracking against your budget.
 
-Built and tested against Capitec CSV exports (main account + credit card), but the rule engine is generic — any bank that exports a similar CSV shape should work.
+**Built specifically for Capitec CSVs** (main account + credit card). The rule-matching logic is generic, but the CSV ingest assumes Capitec's exact column layout (`Money In` / `Money Out` / `Fee` split, plus an auto-populated `Category` column). Other SA banks (FNB, Standard Bank, Nedbank, ABSA) use different column names and don't auto-categorise — adapting to them is a real porting job, not drop-in. PRs welcome.
 
 ## Why
 
-Most budget apps assume a calendar month. If you get paid on the 25th, a calendar month splits your pay cycle in half and skews the budget-vs-actuals comparison. **CapiTracker uses a configurable pay-cycle window** (default 25th → 25th) so what you see actually matches how you spend.
+Most budget apps either cost money or their bank integrations don't work in South Africa (à la Vault22, 22Seven). This tool bridges most of the gap — you still have to manually email your statement CSV to yourself (use the same Gmail address the Google Sheet is saved under), but the script picks it up automatically from there. Beats manually exporting and importing every month.
+
+It's also **pay-cycle aware**: if you get paid on the 25th, calendar months split your spending in half and the budget-vs-actuals comparison gets skewed. CapiTracker lets you pick the cycle window (default 25th → 25th) so what you see matches how you actually spend.
 
 ## How it works
 
