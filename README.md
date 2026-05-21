@@ -2,6 +2,10 @@
 
 > To Keep the Budget Lekker.
 
+**Try it live:**
+- 🪙 **App:** https://milandekock.github.io/capitracker/budget_tracker.html
+- 🛠️ **Setup wizard (first-time users):** https://milandekock.github.io/capitracker/setup_wizard.html
+
 A single-file budget tracker for South African bank statements. Reads CSVs you email to yourself, classifies them with simple rules, and shows you how the current pay cycle is tracking against your budget.
 
 Built and tested against Capitec CSV exports (main account + credit card), but the rule engine is generic — any bank that exports a similar CSV shape should work.
