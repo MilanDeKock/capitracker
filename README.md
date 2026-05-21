@@ -4,6 +4,8 @@
 
 🪙 **Try it live:** **https://milandekock.github.io/capitracker/**
 
+![Dashboard](demo/dashboard.png)
+
 A single-file budget tracker for South African bank statements. Reads CSVs you email to yourself, classifies them with simple rules, and shows you how the current pay cycle is tracking against your budget.
 
 **Built specifically for Capitec CSVs** (main account + credit card). The rule-matching logic is generic, but the CSV ingest assumes Capitec's exact column layout (`Money In` / `Money Out` / `Fee` split, plus an auto-populated `Category` column). Other SA banks (FNB, Standard Bank, Nedbank, ABSA) use different column names and don't auto-categorise — adapting to them is a real porting job, not drop-in. PRs welcome.
@@ -62,8 +64,19 @@ The Apps Script picks new attachments up on Sheet open, or whenever the app call
 
 - **Sheet-backed** — all data lives in your Google Sheet, not in browser storage.
 - **Pay-cycle aware** — budget windows align with your pay day, not the calendar month.
+
+![Budget configuration](demo/budget.png)
+
 - **Running watch** — pick any budget line, see a live running total of spend against it for the current cycle, with red rows once you've gone over.
+
+![Running watch](demo/running-watch.png)
+
 - **Rule-based classification** — match by description substring, exact category, or parent category. First match wins.
+
+![Transactions classification](demo/transactions.png)
+
+![Classification rules](demo/rules.png)
+
 - **Dedup on import** — re-imports the same CSV without creating duplicate rows.
 - **Two-account merge** — main account + credit card both feed into one ledger.
 - **Private mode** — blur amounts with one click for screen-sharing.

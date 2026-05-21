@@ -19,3 +19,6 @@ Thumbs.db
 *.jpeg
 *.gif
 logo_b64.txt
+
+# Allow demo screenshots through
+!demo/*.png
