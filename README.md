@@ -80,6 +80,54 @@ setup_wizard.html     Optional first-run setup helper
 keys.txt              YOUR token + Web App URL (gitignored, do not commit)
 ```
 
+## Security model
+
+CapiTracker runs entirely in your own infrastructure: your Google account, your Sheet, your browser. There's no central server, no shared database, and the maintainer never sees your data. But since this tool touches financial data, the trust model is worth understanding.
+
+### What protects your data
+
+- Your **Google account** (with 2FA, hopefully) owns the Sheet that holds your transactions.
+- A **single `SHARED_TOKEN`** you choose at setup gates every request from the HTML app to your Apps Script. Wrong token → rejected.
+- The token and Web App URL live in your **browser's localStorage**, scoped to `milandekock.github.io`. They don't leave your browser except to hit your own Apps Script.
+
+### Worst case if your token leaks
+
+Someone with your **`SHARED_TOKEN` + Web App URL** can:
+- Read every transaction, your budget, your rules, your settings.
+- Trigger the Gmail scan and read any matched bank-statement CSVs.
+- Overwrite or delete data in your Sheet. *Recoverable via Sheets version history.*
+
+They **cannot:**
+- Touch your bank account or move money — there's zero banking API access.
+- Read any other Gmail beyond the hardcoded bank-statement query.
+- Access any other Google service (Drive, Docs, Calendar, other Sheets).
+- Send email from your address.
+- Take over your Google account or see your password / 2FA.
+
+**TL;DR — privacy loss is real, financial loss is zero.**
+
+### Recovery (~5 min if it ever happens)
+
+1. Apps Script → Deploy → Manage deployments → **archive** the current one.
+2. Set a new `SHARED_TOKEN`. Create a new deployment (new URL).
+3. Update your HTML's Setup tab with the new URL + token.
+4. Sheet → File → Version history → restore anything that was tampered with.
+
+### Defensive defaults
+
+- Use a long random `SHARED_TOKEN` (32+ chars from a password generator). Don't commit it.
+- Turn on **2FA on your Google account** if you haven't.
+- Treat the Web App URL as semi-sensitive. It must be "Anyone with the link" for the architecture to work, but it shouldn't be on your public Twitter either.
+
+### Residual risks
+
+- **CDN supply chain.** The HTML loads React, ReactDOM, Babel, and PapaParse from public CDNs. Exact versions are pinned with **Subresource Integrity (SRI)** hashes — if a CDN swaps the file, your browser refuses to execute it. Tailwind's Play CDN serves dynamic CSS and can't be SRI'd, so that remains a small residual risk.
+- **Trust in the maintainer.** GitHub Pages serves whatever's on `main`. A compromised maintainer account could push hostile code. Mitigation: 2FA on the maintainer account. For zero-trust users: fork the repo, audit the code, host your own GitHub Pages.
+
+### Reporting a vulnerability
+
+Please don't open public Issues for security problems. See [SECURITY.md](SECURITY.md).
+
 ## Contributing — help make this work for your bank
 
 Right now CapiTracker only really works with Capitec CSVs. If you bank elsewhere and want to use this — **open an issue or a PR**. The kind of contributions that are welcome:

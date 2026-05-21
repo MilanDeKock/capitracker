@@ -9,10 +9,21 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Serif:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
 <script src="https://cdn.tailwindcss.com"></script>
-<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
-<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
-<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+<!-- Pinned versions + Subresource Integrity hashes. If a CDN ever swaps these files,
+     the browser refuses to execute them. Update both version and hash together;
+     compute hash with:  curl -sL <url> | openssl dgst -sha384 -binary | openssl base64 -A -->
+<script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"
+        integrity="sha384-DGyLxAyjq0f9SPpVevD6IgztCFlnMF6oW/XQGmfe+IsZ8TqEiDrcHkMLKI6fiB/Z"
+        crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"
+        integrity="sha384-gTGxhz21lVGYNMcdJOyq01Edg0jhn/c22nsx0kyqP0TxaV5WVdsSH1fSDUf5YJj1"
+        crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.26.0/babel.min.js"
+        integrity="sha384-gfoIoghgrQ+acOP1IAci7PIH0wjwxDVkjgSczIHAcAGEWKu6Ztq1HaNa41oW95ya"
+        crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"
+        integrity="sha384-D/t0ZMqQW31H3az8ktEiNb39wyKnS82iFY52QPACM+IjKW3jDUhyIgh2PApRqJZs"
+        crossorigin="anonymous"></script>
 <style>
   body { font-family: 'IBM Plex Sans', system-ui, sans-serif; background: #F7F5EF; }
   .font-display { font-family: 'IBM Plex Serif', Georgia, serif; }
