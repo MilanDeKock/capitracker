@@ -58,6 +58,7 @@ Whatever email the Sheet/Apps Script lives under — send `account_statement_*.c
 
 - **Sheet-backed** — all data lives in your Google Sheet, not in browser storage.
 - **Pay-cycle aware** — budget windows align with your pay day, not the calendar month.
+- **Running watch** — pick any budget line, see a live running total of spend against it for the current cycle, with red rows once you've gone over.
 - **Rule-based classification** — match by description substring, exact category, or parent category. First match wins.
 - **Dedup on import** — re-imports the same CSV without creating duplicate rows.
 - **Two-account merge** — main account + credit card both feed into one ledger.

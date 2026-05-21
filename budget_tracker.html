@@ -56,6 +56,7 @@ const K = {
   overrides:  'bt.overrides',  // hash → line, for rows not yet posted to history
   tab:        'bt.tab',        // last selected tab
   privateMode:'bt.privateMode',// blur sensitive amounts (eye toggle)
+  watchLine:  'bt.watchLine',  // which budget line the Running Watch panel is showing
 };
 const loadLS = (k, fallback) => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fallback; } catch { return fallback; } };
 const saveLS = (k, v)        => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
@@ -728,10 +729,18 @@ function Dashboard({ budget, actuals, settings, dateRange, setDateRange, default
   const gap         = settings.netIncome - totalActual;
   const budgetGap   = settings.netIncome - totalBudget;
 
-  const bokTx = windowTxs.filter(t => t.line === 'Bok Fonds' && t.amount < 0).sort((a, b) => a.date.localeCompare(b.date));
-  const bokBudget = budget.find(b => b.line === 'Bok Fonds')?.amount || 0;
-  let bokRun = 0;
-  const bokWithRun = bokTx.map(t => { bokRun += Math.abs(t.amount); return { ...t, running: bokRun }; });
+  // Running watch — user picks any budget line; falls back gracefully if the
+  // saved line no longer exists (e.g. user renamed/removed it).
+  const budgetLineNames = budget.map(b => b.line);
+  const [storedWatchLine, _setWatchLine] = useState(() => loadLS(K.watchLine, null));
+  const setWatchLine = (v) => { _setWatchLine(v); saveLS(K.watchLine, v); };
+  const watchLine = budgetLineNames.includes(storedWatchLine)
+    ? storedWatchLine
+    : (budgetLineNames.includes('Bok Fonds') ? 'Bok Fonds' : (budgetLineNames[0] || ''));
+  const watchTx = windowTxs.filter(t => t.line === watchLine && t.amount < 0).sort((a, b) => a.date.localeCompare(b.date));
+  const watchBudget = budget.find(b => b.line === watchLine)?.amount || 0;
+  let watchRun = 0;
+  const watchWithRun = watchTx.map(t => { watchRun += Math.abs(t.amount); return { ...t, running: watchRun }; });
 
   return (
     <div className="space-y-6">
@@ -836,37 +845,59 @@ function Dashboard({ budget, actuals, settings, dateRange, setDateRange, default
         </div>
       )}
 
-      {bokWithRun.length > 0 && (
+      {watchLine && (
         <div className="bg-white border border-stone-300 rounded-sm overflow-hidden">
-          <div className="px-5 py-3 border-b border-stone-200">
-            <h2 className="font-display text-lg">Bok Fonds running watch</h2>
-            <div className="text-xs text-stone-500 mt-0.5">Red row = running total has passed R{bokBudget.toLocaleString()} for the selected window.</div>
+          <div className="px-5 py-3 border-b border-stone-200 flex items-start gap-3 flex-wrap">
+            <div className="min-w-0">
+              <h2 className="font-display text-lg">Running watch</h2>
+              <div className="text-xs text-stone-500 mt-0.5">
+                Track running spend for one budget line.
+                {watchBudget > 0 && <> Red row = running total has passed R{watchBudget.toLocaleString()} for the selected window.</>}
+              </div>
+            </div>
+            <div className="ml-auto flex items-center gap-2">
+              <label className="text-xs uppercase tracking-wider text-stone-500">Line</label>
+              <select
+                value={watchLine}
+                onChange={e => setWatchLine(e.target.value)}
+                className="px-2 py-1 border border-stone-300 text-sm bg-white">
+                {budget.map(b => (
+                  <option key={b.line} value={b.line}>{b.line}</option>
+                ))}
+              </select>
+            </div>
           </div>
-          <div className="max-h-96 overflow-y-auto">
-            <table className="w-full text-sm">
-              <thead className="sticky top-0 bg-white">
-                <tr className="text-xs uppercase tracking-wider text-stone-500 border-b border-stone-200">
-                  <th className="text-left px-5 py-2 font-medium">Date</th>
-                  <th className="text-left px-3 py-2 font-medium">Description</th>
-                  <th className="text-right px-3 py-2 font-medium">Amount</th>
-                  <th className="text-right px-5 py-2 font-medium">Running</th>
-                </tr>
-              </thead>
-              <tbody>
-                {bokWithRun.map((t, i) => {
-                  const over = t.running > bokBudget;
-                  return (
-                    <tr key={t.hash || i} className={`border-b border-stone-100 ${over ? 'bg-red-50' : ''}`}>
-                      <td className="px-5 py-1.5 font-num text-stone-600 text-xs">{t.date}</td>
-                      <td className="px-3 py-1.5 truncate max-w-md">{t.description}</td>
-                      <td className="px-3 py-1.5 text-right font-num">{fmt(Math.abs(t.amount))}</td>
-                      <td className={`px-5 py-1.5 text-right font-num font-medium ${over ? 'text-red-700' : ''}`}>{fmt(t.running)}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+          {watchWithRun.length === 0 ? (
+            <div className="px-5 py-8 text-center text-sm text-stone-500">
+              No transactions tagged to <span className="font-medium text-stone-700">{watchLine}</span> in this cycle yet.
+            </div>
+          ) : (
+            <div className="max-h-96 overflow-y-auto">
+              <table className="w-full text-sm">
+                <thead className="sticky top-0 bg-white">
+                  <tr className="text-xs uppercase tracking-wider text-stone-500 border-b border-stone-200">
+                    <th className="text-left px-5 py-2 font-medium">Date</th>
+                    <th className="text-left px-3 py-2 font-medium">Description</th>
+                    <th className="text-right px-3 py-2 font-medium">Amount</th>
+                    <th className="text-right px-5 py-2 font-medium">Running</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {watchWithRun.map((t, i) => {
+                    const over = watchBudget > 0 && t.running > watchBudget;
+                    return (
+                      <tr key={t.hash || i} className={`border-b border-stone-100 ${over ? 'bg-red-50' : ''}`}>
+                        <td className="px-5 py-1.5 font-num text-stone-600 text-xs">{t.date}</td>
+                        <td className="px-3 py-1.5 truncate max-w-md">{t.description}</td>
+                        <td className="px-3 py-1.5 text-right font-num">{fmt(Math.abs(t.amount))}</td>
+                        <td className={`px-5 py-1.5 text-right font-num font-medium ${over ? 'text-red-700' : ''}`}>{fmt(t.running)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       )}
     </div>
