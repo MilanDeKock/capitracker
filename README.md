@@ -10,7 +10,7 @@ A single-file budget tracker for South African bank statements. Reads CSVs you e
 
 ## Why
 
-Most budget apps either cost money or their bank integrations don't work in South Africa (à la Vault22, 22Seven). This tool bridges most of the gap — you still have to manually email your statement CSV to yourself (use the same Gmail address the Google Sheet is saved under), but the script picks it up automatically from there. Beats manually exporting and importing every month.
+Most budget apps either cost money or their bank integrations don't work in South Africa (aiii Vault22). This tool bridges most of the gap — you still have to manually email your statement CSV to yourself (use the same Gmail address the Google Sheet is saved under), but the script picks it up automatically from there. Beats manually exporting and importing every month.
 
 It's also **pay-cycle aware**: if you get paid on the 25th, calendar months split your spending in half and the budget-vs-actuals comparison gets skewed. CapiTracker lets you pick the cycle window (default 25th → 25th) so what you see matches how you actually spend.
 
