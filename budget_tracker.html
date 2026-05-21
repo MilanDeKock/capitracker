@@ -1,0 +1,1264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>CapiTracker</title>
+<link rel="icon" type="image/svg+xml" href='data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y="86" font-size="92">🪙</text></svg>' />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Serif:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+<style>
+  body { font-family: 'IBM Plex Sans', system-ui, sans-serif; background: #F7F5EF; }
+  .font-display { font-family: 'IBM Plex Serif', Georgia, serif; }
+  .font-num     { font-family: 'IBM Plex Mono', ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="env,react">
+const { useState, useEffect, useMemo, useCallback } = React;
+
+/* ============================================================================
+   Icons (inline SVG)
+   ========================================================================== */
+const Icon = ({ d, className = "w-4 h-4" }) => (
+  <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">{d}</svg>
+);
+const IconUpload    = (p) => <Icon {...p} d={<><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></>}/>;
+const IconPlus      = (p) => <Icon {...p} d={<><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></>}/>;
+const IconTrash     = (p) => <Icon {...p} d={<><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></>}/>;
+const IconRotate    = (p) => <Icon {...p} d={<><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></>}/>;
+const IconFile      = (p) => <Icon {...p} d={<><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></>}/>;
+const IconCog       = (p) => <Icon {...p} d={<><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></>}/>;
+const IconChart     = (p) => <Icon {...p} d={<><line x1="12" y1="20" x2="12" y2="10"/><line x1="18" y1="20" x2="18" y2="4"/><line x1="6" y1="20" x2="6" y2="16"/></>}/>;
+const IconList      = (p) => <Icon {...p} d={<><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></>}/>;
+const IconAlert     = (p) => <Icon {...p} d={<><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></>}/>;
+const IconX         = (p) => <Icon {...p} d={<><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></>}/>;
+const IconRefresh   = (p) => <Icon {...p} d={<><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></>}/>;
+const IconLink      = (p) => <Icon {...p} d={<><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></>}/>;
+const IconCheck     = (p) => <Icon {...p} d={<><polyline points="20 6 9 17 4 12"/></>}/>;
+const IconEye       = (p) => <Icon {...p} d={<><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></>}/>;
+const IconEyeOff    = (p) => <Icon {...p} d={<><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></>}/>;
+
+/* ============================================================================
+   Storage keys & helpers (localStorage)
+   ========================================================================== */
+const K = {
+  config:     'bt.config',     // {sheetUrl, sheetToken}
+  cache:      'bt.cache',      // last loaded snapshot — offline fallback only
+  overrides:  'bt.overrides',  // hash → line, for rows not yet posted to history
+  tab:        'bt.tab',        // last selected tab
+  privateMode:'bt.privateMode',// blur sensitive amounts (eye toggle)
+};
+const loadLS = (k, fallback) => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fallback; } catch { return fallback; } };
+const saveLS = (k, v)        => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
+
+// Substrings (case-insensitive) used to hide internal transfers between your own accounts.
+// Add more patterns here if Capitec uses different wording for any of your self-transfers.
+const INTERNAL = [
+  'transfer to credit card',
+  'transfer received from main account',
+  'transfer received from credit card',
+  'transfer to main account',
+  // Add patterns specific to your own self-transfers here, e.g.:
+  // 'transfer received from <your-account-name>',
+  // 'transfer to <your-account-name>',
+];
+const isInternalTx = t => {
+  const d = (t.description || '').toLowerCase();
+  const o = (t.originalDesc || '').toLowerCase();
+  return INTERNAL.some(k => d.includes(k) || o.includes(k));
+};
+
+/* ============================================================================
+   Date / cycle helpers
+   ========================================================================== */
+function parseISO(s) {
+  if (!s) return null;
+  const [y, m, d] = String(s).slice(0, 10).split('-').map(Number);
+  if (!y || !m || !d) return null;
+  return new Date(y, m - 1, d);
+}
+function toISO(d) {
+  if (!(d instanceof Date) || isNaN(d)) return '';
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+function cycleStartFor(dateStr, anchorDay) {
+  const d = parseISO(dateStr) || new Date();
+  if (d.getDate() >= anchorDay) return new Date(d.getFullYear(), d.getMonth(), anchorDay);
+  return new Date(d.getFullYear(), d.getMonth() - 1, anchorDay);
+}
+function cycleEndFor(dateStr, anchorDay) {
+  const s = cycleStartFor(dateStr, anchorDay);
+  return new Date(s.getFullYear(), s.getMonth() + 1, anchorDay);
+}
+function cycleKey(dateStr, anchorDay) {
+  return toISO(cycleStartFor(dateStr, anchorDay));
+}
+function prettyDate(iso) {
+  const d = parseISO(iso);
+  if (!d) return '—';
+  return d.toLocaleDateString('en-ZA', { day: '2-digit', month: 'short', year: 'numeric' });
+}
+function prettyCycle(cycleStartISO, anchorDay) {
+  const s = parseISO(cycleStartISO);
+  if (!s) return '—';
+  const e = new Date(s.getFullYear(), s.getMonth() + 1, s.getDate());
+  e.setDate(e.getDate() - 1);
+  const sStr = s.toLocaleDateString('en-ZA', { day: '2-digit', month: 'short' });
+  const eStr = e.toLocaleDateString('en-ZA', { day: '2-digit', month: 'short', year: 'numeric' });
+  return `${sStr} – ${eStr}`;
+}
+
+/* ============================================================================
+   Format helpers
+   ========================================================================== */
+const fmt = (n, dp = 0) => {
+  if (!n || Math.abs(n) < 0.005) return '–';
+  const v = Math.abs(n).toLocaleString('en-ZA', { minimumFractionDigits: dp, maximumFractionDigits: dp });
+  return n < 0 ? `(${v})` : v;
+};
+const fmtSigned = n => {
+  if (!n || Math.abs(n) < 0.5) return '0';
+  const s = n > 0 ? '+' : '−';
+  return s + Math.abs(n).toLocaleString('en-ZA', { maximumFractionDigits: 0 });
+};
+
+/* ============================================================================
+   Row normalization (Sheet/CSV → JS tx shape)
+   ========================================================================== */
+function normalizeRow(r) {
+  const mi = Number(r['Money In']) || 0;
+  const mo = Number(r['Money Out']) || 0;
+  const fe = Number(r['Fee']) || 0;
+  return {
+    account: String(r['Account'] || ''),
+    date: String(r['Posting Date'] || '').slice(0, 10),
+    transactionDate: String(r['Transaction Date'] || '').slice(0, 10),
+    description: String(r['Description'] || ''),
+    originalDesc: String(r['Original Description'] || r['Description'] || ''),
+    parentCategory: String(r['Parent Category'] || ''),
+    bankCategory: String(r['Category'] || ''),
+    moneyIn: mi,
+    moneyOut: mo,
+    fee: fe,
+    amount: mi + mo + fe,
+    line: r['Line'] || null,
+    postedAt: r['Posted At'] || null,
+  };
+}
+function denormalizeRow(t) {
+  return {
+    'Account': t.account,
+    'Posting Date': t.date,
+    'Transaction Date': t.transactionDate,
+    'Description': t.description,
+    'Original Description': t.originalDesc,
+    'Parent Category': t.parentCategory,
+    'Category': t.bankCategory,
+    'Money In': t.moneyIn,
+    'Money Out': t.moneyOut,
+    'Fee': t.fee,
+    'Line': t.line,
+  };
+}
+const txHash = t => `${t.date}|${(t.originalDesc || t.description || '').toLowerCase()}|${(t.amount || 0).toFixed(2)}`;
+
+/* ============================================================================
+   Classifier
+   ========================================================================== */
+function classify(tx, rules) {
+  if (tx.amount > 0) return tx.bankCategory === 'Salary' ? 'Salary' : 'Other Income';
+  const desc = (tx.description || '').toLowerCase();
+  const orig = (tx.originalDesc || '').toLowerCase();
+  for (const r of rules) {
+    const val = (r.value || '').toLowerCase();
+    if (r.type === 'desc' && val && (desc.includes(val) || orig.includes(val))) return r.line;
+    if (r.type === 'cat'  && tx.bankCategory  === r.value) return r.line;
+    if (r.type === 'pcat' && tx.parentCategory === r.value) return r.line;
+  }
+  return 'Review';
+}
+
+/* ============================================================================
+   CSV parser (fallback path, manual drop)
+   ========================================================================== */
+function parseCsvText(text) {
+  const res = Papa.parse(text, { header: true, skipEmptyLines: true });
+  return res.data
+    .map(normalizeRow)
+    .filter(t => t.date && t.amount !== 0)
+    .filter(t => !INTERNAL.some(k => (t.description || '').toLowerCase().includes(k)));
+}
+
+/* ============================================================================
+   Sheet I/O
+   ========================================================================== */
+async function sheetFetch(config, action, body) {
+  if (!config.sheetUrl || !config.sheetToken) {
+    throw new Error('Sheet not configured — set URL and token in the Setup tab.');
+  }
+  let res;
+  if (body) {
+    res = await fetch(config.sheetUrl, {
+      method: 'POST',
+      body: JSON.stringify({ token: config.sheetToken, action, ...body }),
+      redirect: 'follow',
+    });
+  } else {
+    const url = `${config.sheetUrl}?token=${encodeURIComponent(config.sheetToken)}&action=${action}`;
+    res = await fetch(url, { redirect: 'follow' });
+  }
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const data = await res.json();
+  if (data && data.ok === false) throw new Error(data.error || 'Sheet error');
+  return data;
+}
+
+/* ============================================================================
+   Main app
+   ========================================================================== */
+function BudgetTracker() {
+  const cached = loadLS(K.cache, {});
+  const [config, setConfig]               = useState(() => loadLS(K.config, { sheetUrl: '', sheetToken: '' }));
+  const [budget, setBudget]               = useState(cached.budget         || []);
+  const [rules, setRules]                 = useState(cached.rules          || []);
+  const [settings, setSettings]           = useState(cached.settings       || { netIncome: 0, anchorDay: 25 });
+  const [rawStatements, setRawStatements] = useState(cached.rawStatements  || []);
+  const [history, setHistory]             = useState(cached.history        || []);
+  const [overrides, setOverrides]         = useState(() => loadLS(K.overrides, {}));
+  const [csvRows, setCsvRows]             = useState([]);
+  const [fileNames, setFileNames]         = useState([]);
+  const [tab, setTab]                     = useState(() => {
+    const saved = loadLS(K.tab, null);
+    const cfg = loadLS(K.config, { sheetUrl: '', sheetToken: '' });
+    if (saved) return saved;
+    return (cfg.sheetUrl && cfg.sheetToken) ? 'dashboard' : 'setup';
+  });
+  const [privateMode, setPrivateMode]     = useState(() => loadLS(K.privateMode, false));
+  const [loading, setLoading]             = useState(false);
+  const [syncStatus, setSyncStatus]       = useState(null); // {kind:'ok'|'err', message, when}
+  const [importError, setImportError]     = useState(null);
+
+  useEffect(() => saveLS(K.config, config),       [config]);
+  useEffect(() => saveLS(K.overrides, overrides), [overrides]);
+  useEffect(() => saveLS(K.tab, tab),             [tab]);
+  useEffect(() => saveLS(K.privateMode, privateMode), [privateMode]);
+
+  const cacheSnapshot = (next) => {
+    saveLS(K.cache, {
+      rawStatements: next.rawStatements ?? rawStatements,
+      history:       next.history       ?? history,
+      budget:        next.budget        ?? budget,
+      rules:         next.rules         ?? rules,
+      settings:      next.settings      ?? settings,
+    });
+  };
+
+  async function loadFromSheet({ pull = false } = {}) {
+    if (!config.sheetUrl || !config.sheetToken) {
+      setSyncStatus({ kind: 'err', message: 'Configure Sheet URL & token in Setup first.', when: new Date() });
+      return;
+    }
+    setLoading(true);
+    setSyncStatus(null);
+    try {
+      const data = await sheetFetch(config, pull ? 'pull' : 'load');
+      const nRaw     = (data.rawStatements || []).map(normalizeRow).filter(t => t.date && t.amount !== 0);
+      const nHist    = (data.transactions  || []).map(normalizeRow).filter(t => t.date);
+      const nBudget  = (data.budget || []).map(r => ({ line: String(r.Line || ''), amount: Number(r.Amount) || 0 })).filter(b => b.line);
+      const nRules   = (data.rules  || []).map(r => ({ line: String(r.Line || ''), type: String(r.Type || ''), value: String(r.Value || '') })).filter(r => r.line && r.type);
+      const s = data.settings || {};
+      const nSettings = {
+        netIncome: Number(s['Net Income']) || 0,
+        anchorDay: Number(s['Anchor Day']) || 25,
+      };
+      setRawStatements(nRaw);
+      setHistory(nHist);
+      setBudget(nBudget);
+      setRules(nRules);
+      setSettings(nSettings);
+      saveLS(K.cache, { rawStatements: nRaw, history: nHist, budget: nBudget, rules: nRules, settings: nSettings });
+      setSyncStatus({
+        kind: 'ok',
+        message: pull
+          ? `Pulled from Gmail. ${nRaw.length} raw rows, ${nHist.length} in history.`
+          : `Loaded. ${nRaw.length} raw rows, ${nHist.length} in history.`,
+        when: new Date(),
+      });
+    } catch (e) {
+      setSyncStatus({ kind: 'err', message: e.message || String(e), when: new Date() });
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // Initial load when config is set
+  useEffect(() => {
+    if (config.sheetUrl && config.sheetToken) {
+      void loadFromSheet();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [config.sheetUrl, config.sheetToken]);
+
+  const handleFiles = async (files) => {
+    if (!files || !files.length) return;
+    setImportError(null);
+    try {
+      const all = [];
+      const names = [];
+      for (const f of Array.from(files)) {
+        names.push(f.name);
+        const text = await f.text();
+        all.push(...parseCsvText(text));
+      }
+      setCsvRows(all);
+      setFileNames(names);
+    } catch (e) { setImportError(e.message || 'Could not parse file'); }
+  };
+
+  // Merged view: history (canonical) wins over raw/csv on hash collision.
+  // Internal self-transfers between your own accounts are dropped at this layer.
+  const allTxs = useMemo(() => {
+    const seen = new Set();
+    const out = [];
+    for (const t of history) {
+      if (isInternalTx(t)) continue;
+      const h = txHash(t);
+      if (seen.has(h)) continue;
+      seen.add(h);
+      out.push({ ...t, inHistory: true, hash: h, line: t.line || 'Review' });
+    }
+    const candidates = [...rawStatements, ...csvRows];
+    for (const t of candidates) {
+      if (!t.date) continue;
+      if (isInternalTx(t)) continue;
+      const h = txHash(t);
+      if (seen.has(h)) continue;
+      seen.add(h);
+      const auto = classify(t, rules);
+      const line = overrides[h] || auto;
+      out.push({ ...t, inHistory: false, hash: h, line });
+    }
+    out.sort((a, b) => b.date.localeCompare(a.date));
+    return out;
+  }, [history, rawStatements, csvRows, rules, overrides]);
+
+  // Default date range — current cycle
+  const defaultRange = useMemo(() => {
+    const today = toISO(new Date());
+    const start = cycleStartFor(today, settings.anchorDay);
+    const endExcl = new Date(start.getFullYear(), start.getMonth() + 1, settings.anchorDay);
+    const endIncl = new Date(endExcl);
+    endIncl.setDate(endIncl.getDate() - 1);
+    return { from: toISO(start), to: toISO(endIncl) };
+  }, [settings.anchorDay]);
+
+  const [dateRange, setDateRange] = useState(defaultRange);
+  useEffect(() => { setDateRange(defaultRange); }, [defaultRange]);
+
+  const windowTxs = useMemo(
+    () => allTxs.filter(t => t.date >= dateRange.from && t.date <= dateRange.to),
+    [allTxs, dateRange],
+  );
+
+  const actuals = useMemo(() => {
+    const a = {};
+    for (const b of budget) a[b.line] = 0;
+    for (const t of windowTxs) {
+      if (t.amount >= 0) continue;
+      if (a[t.line] === undefined) a[t.line] = 0;
+      a[t.line] -= t.amount;
+    }
+    return a;
+  }, [windowTxs, budget]);
+
+  const allCycles = useMemo(() => {
+    const set = new Set();
+    for (const t of allTxs) if (t.date) set.add(cycleKey(t.date, settings.anchorDay));
+    return Array.from(set).sort();
+  }, [allTxs, settings.anchorDay]);
+
+  const cycleActuals = useMemo(() => {
+    const result = {};
+    for (const cy of allCycles) result[cy] = {};
+    for (const t of allTxs) {
+      if (t.amount >= 0) continue;
+      const cy = cycleKey(t.date, settings.anchorDay);
+      if (!result[cy]) result[cy] = {};
+      if (!result[cy][t.line]) result[cy][t.line] = 0;
+      result[cy][t.line] -= t.amount;
+    }
+    return result;
+  }, [allTxs, allCycles, settings.anchorDay]);
+
+  const lineNames           = budget.map(b => b.line);
+  const newTxs              = allTxs.filter(t => !t.inHistory);
+  const newClassified       = newTxs.filter(t => t.line !== 'Review');
+  const stillNeedingReview  = newTxs.length - newClassified.length;
+
+  async function handlePostToHistory() {
+    if (!newClassified.length) return;
+    setLoading(true);
+    setSyncStatus(null);
+    try {
+      const rows = newClassified.map(t => denormalizeRow(t));
+      const res = await sheetFetch(config, null, { action: 'append-history', rows });
+      const now = new Date().toISOString();
+      const appended = newClassified.map(t => ({
+        account: t.account, date: t.date, transactionDate: t.transactionDate,
+        description: t.description, originalDesc: t.originalDesc,
+        parentCategory: t.parentCategory, bankCategory: t.bankCategory,
+        moneyIn: t.moneyIn, moneyOut: t.moneyOut, fee: t.fee, amount: t.amount,
+        line: t.line, postedAt: now,
+      }));
+      const nextHistory = [...history, ...appended];
+      setHistory(nextHistory);
+      cacheSnapshot({ history: nextHistory });
+      const newOv = { ...overrides };
+      for (const t of newClassified) delete newOv[t.hash];
+      setOverrides(newOv);
+      setSyncStatus({ kind: 'ok', message: `Posted ${res.appended} row(s) to history.`, when: new Date() });
+    } catch (e) {
+      setSyncStatus({ kind: 'err', message: e.message || String(e), when: new Date() });
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleSaveBudget(newBudget, newSettings) {
+    setLoading(true);
+    setSyncStatus(null);
+    try {
+      const rows = newBudget.map(b => ({ Line: b.line, Amount: b.amount }));
+      await sheetFetch(config, null, { action: 'save-budget', rows });
+      await sheetFetch(config, null, { action: 'save-settings', settings: { 'Net Income': newSettings.netIncome, 'Anchor Day': newSettings.anchorDay } });
+      setBudget(newBudget);
+      setSettings(newSettings);
+      cacheSnapshot({ budget: newBudget, settings: newSettings });
+      setSyncStatus({ kind: 'ok', message: 'Budget saved to Sheet.', when: new Date() });
+    } catch (e) {
+      setSyncStatus({ kind: 'err', message: e.message || String(e), when: new Date() });
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleEditHistoryLine(hash, newLine) {
+    const prev = history;
+    setHistory(history.map(t => txHash(t) === hash ? { ...t, line: newLine } : t));
+    try {
+      await sheetFetch(config, null, { action: 'update-history', hash, line: newLine });
+      const updated = history.map(t => txHash(t) === hash ? { ...t, line: newLine } : t);
+      cacheSnapshot({ history: updated });
+      setSyncStatus({ kind: 'ok', message: 'Updated in history.', when: new Date() });
+    } catch (e) {
+      setHistory(prev);
+      setSyncStatus({ kind: 'err', message: 'Edit failed: ' + (e.message || String(e)), when: new Date() });
+    }
+  }
+
+  async function handleDeleteHistoryRow(hash) {
+    const prev = history;
+    const filtered = history.filter(t => txHash(t) !== hash);
+    setHistory(filtered);
+    try {
+      await sheetFetch(config, null, { action: 'delete-history', hash });
+      cacheSnapshot({ history: filtered });
+      setSyncStatus({ kind: 'ok', message: 'Removed from history.', when: new Date() });
+    } catch (e) {
+      setHistory(prev);
+      setSyncStatus({ kind: 'err', message: 'Delete failed: ' + (e.message || String(e)), when: new Date() });
+    }
+  }
+
+  async function handleSaveRules(newRules) {
+    setLoading(true);
+    setSyncStatus(null);
+    try {
+      const rows = newRules.map(r => ({ Line: r.line, Type: r.type, Value: r.value }));
+      await sheetFetch(config, null, { action: 'save-rules', rows });
+      setRules(newRules);
+      cacheSnapshot({ rules: newRules });
+      setSyncStatus({ kind: 'ok', message: 'Rules saved to Sheet.', when: new Date() });
+    } catch (e) {
+      setSyncStatus({ kind: 'err', message: e.message || String(e), when: new Date() });
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const setOverride   = (hash, line) => setOverrides(o => ({ ...o, [hash]: line }));
+  const clearOverride = (hash)       => setOverrides(o => { const n = { ...o }; delete n[hash]; return n; });
+
+  const configured = !!(config.sheetUrl && config.sheetToken);
+
+  return (
+    <div className="min-h-screen text-stone-900">
+      <header style={{ backgroundColor: '#1A2540' }} className="border-b border-stone-300">
+        <div className="max-w-7xl mx-auto px-6 py-5 text-stone-100">
+          <div className="flex items-baseline justify-between flex-wrap gap-3">
+            <div>
+              <h1 className="font-display text-2xl font-medium tracking-tight flex items-center gap-2"><span className="text-2xl leading-none">🪙</span>CapiTracker</h1>
+              <p className="text-stone-400 text-xs mt-0.5 tracking-wide uppercase">To Keep The Budget Lekker</p>
+            </div>
+            <div className="text-right text-xs text-stone-300">
+              {configured ? (
+                <>
+                  <div className="font-num">{history.length} in history · {newTxs.length} new · {allCycles.length} cycles</div>
+                  <div className="text-stone-400">Anchor day {settings.anchorDay} · net <span className={privateMode ? 'blur-sm select-none' : ''}>R{(settings.netIncome || 0).toLocaleString('en-ZA')}</span></div>
+                </>
+              ) : <div className="text-stone-400">No Sheet connection yet</div>}
+            </div>
+          </div>
+        </div>
+      </header>
+
+      {syncStatus && (
+        <div className="max-w-7xl mx-auto px-6 pt-3">
+          <div className={`text-xs px-3 py-2 flex items-center justify-between gap-2 border ${syncStatus.kind === 'err' ? 'bg-red-50 text-red-800 border-red-200' : 'bg-emerald-50 text-emerald-800 border-emerald-200'}`}>
+            <div className="flex items-center gap-2">
+              {syncStatus.kind === 'err' ? <IconAlert className="w-3.5 h-3.5" /> : <IconCheck className="w-3.5 h-3.5" />}
+              <span>{syncStatus.message}</span>
+              <span className="text-stone-500 font-num">{syncStatus.when ? syncStatus.when.toLocaleTimeString('en-ZA') : ''}</span>
+            </div>
+            <button onClick={() => setSyncStatus(null)} className="hover:opacity-70"><IconX className="w-3.5 h-3.5" /></button>
+          </div>
+        </div>
+      )}
+
+      <div className="max-w-7xl mx-auto px-6 pt-4">
+        <Uploader
+          onFiles={handleFiles}
+          fileNames={fileNames}
+          error={importError}
+          clear={() => { setCsvRows([]); setFileNames([]); }}
+          configured={configured}
+          loading={loading}
+          onSync={() => loadFromSheet({ pull: true })}
+          onReload={() => loadFromSheet()}
+        />
+      </div>
+
+      <div className="max-w-7xl mx-auto px-6 mt-6 border-b border-stone-300">
+        <nav className="flex gap-1 flex-wrap">
+          <TabBtn id="dashboard"    cur={tab} set={setTab} Icon={IconChart} label="Dashboard" />
+          <TabBtn id="transactions" cur={tab} set={setTab} Icon={IconFile}  label={`Transactions${newTxs.length ? ` · ${newTxs.length} new` : ''}`} />
+          <TabBtn id="rules"        cur={tab} set={setTab} Icon={IconList}  label="Rules" />
+          <TabBtn id="budget"       cur={tab} set={setTab} Icon={IconCog}   label="Budget" />
+          <TabBtn id="setup"        cur={tab} set={setTab} Icon={IconLink}  label={configured ? 'Setup' : 'Setup — start here'} />
+        </nav>
+      </div>
+
+      <main className="max-w-7xl mx-auto px-6 py-7">
+        {tab === 'dashboard'    && <Dashboard
+                                      budget={budget}
+                                      actuals={actuals}
+                                      settings={settings}
+                                      dateRange={dateRange}
+                                      setDateRange={setDateRange}
+                                      defaultRange={defaultRange}
+                                      windowTxs={windowTxs}
+                                      allCycles={allCycles}
+                                      cycleActuals={cycleActuals}
+                                      hasData={allTxs.length > 0}
+                                      privateMode={privateMode}
+                                      setPrivateMode={setPrivateMode}
+                                    />}
+        {tab === 'transactions' && <Transactions
+                                      allTxs={allTxs}
+                                      lineNames={lineNames}
+                                      overrides={overrides}
+                                      setOverride={setOverride}
+                                      clearOverride={clearOverride}
+                                      anchorDay={settings.anchorDay}
+                                      onPostToHistory={handlePostToHistory}
+                                      onEditHistoryLine={handleEditHistoryLine}
+                                      onDeleteHistoryRow={handleDeleteHistoryRow}
+                                      posting={loading}
+                                      newCount={newTxs.length}
+                                      newClassifiedCount={newClassified.length}
+                                      stillNeedingReview={stillNeedingReview}
+                                    />}
+        {tab === 'rules'        && <RulesEditor
+                                      rules={rules}
+                                      lineNames={lineNames}
+                                      onSave={handleSaveRules}
+                                      saving={loading}
+                                    />}
+        {tab === 'budget'       && <BudgetEditor
+                                      budget={budget}
+                                      settings={settings}
+                                      onSave={handleSaveBudget}
+                                      saving={loading}
+                                    />}
+        {tab === 'setup'        && <SetupPanel
+                                      config={config}
+                                      setConfig={setConfig}
+                                      onSync={() => loadFromSheet({ pull: true })}
+                                      onReload={() => loadFromSheet()}
+                                      loading={loading}
+                                      hasData={allTxs.length > 0}
+                                    />}
+      </main>
+
+      <footer className="max-w-7xl mx-auto px-6 pb-10 text-xs text-stone-500">
+        Sheet is canonical. localStorage caches the last snapshot for offline view. Overrides live locally until you post to history.
+      </footer>
+    </div>
+  );
+}
+
+/* ============================================================================
+   Components
+   ========================================================================== */
+function Uploader({ onFiles, fileNames, error, clear, configured, loading, onSync, onReload }) {
+  const [hover, setHover] = useState(false);
+  return (
+    <div
+      onDragOver={e => { e.preventDefault(); setHover(true); }}
+      onDragLeave={() => setHover(false)}
+      onDrop={e => { e.preventDefault(); setHover(false); onFiles(e.dataTransfer.files); }}
+      className={`border-2 border-dashed rounded-sm px-5 py-3 transition-colors ${hover ? 'border-slate-700 bg-stone-100' : 'border-stone-300 bg-white'}`}>
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div className="flex items-center gap-3">
+          <IconUpload className="w-5 h-5 text-slate-700" />
+          <div>
+            <div className="text-sm font-medium">CSV import (manual fallback)</div>
+            <div className="text-xs text-stone-500">Sheet is the primary path. Drop a Capitec CSV here if you need to bring in transactions out-of-band.</div>
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          {configured && (
+            <>
+              <button onClick={onSync} disabled={loading} className="px-2.5 py-1 text-xs uppercase tracking-wider font-medium border border-slate-800 text-slate-800 hover:bg-slate-800 hover:text-stone-50 disabled:opacity-50 flex items-center gap-1.5">
+                <IconRefresh className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />Sync Gmail
+              </button>
+              <button onClick={onReload} disabled={loading} className="px-2.5 py-1 text-xs uppercase tracking-wider font-medium border border-stone-300 text-stone-700 hover:bg-stone-100 disabled:opacity-50">
+                Reload sheet
+              </button>
+            </>
+          )}
+          <label className="cursor-pointer inline-block px-2.5 py-1 text-xs uppercase tracking-wider font-medium border border-stone-300 text-stone-700 hover:bg-stone-100">
+            Drop CSV
+            <input type="file" multiple accept=".csv" className="hidden" onChange={e => onFiles(e.target.files)} />
+          </label>
+          {fileNames.length > 0 && <button onClick={clear} className="text-xs text-stone-500 hover:text-stone-900 underline">clear</button>}
+        </div>
+      </div>
+      {fileNames.length > 0 && (
+        <div className="mt-2 flex flex-wrap gap-2">
+          {fileNames.map((n, i) => <span key={i} className="text-xs px-2 py-0.5 bg-stone-100 border border-stone-200 font-num text-stone-700">{n}</span>)}
+        </div>
+      )}
+      {error && <div className="mt-2 text-xs text-red-700 flex items-center gap-1.5"><IconAlert className="w-3.5 h-3.5"/>{error}</div>}
+    </div>
+  );
+}
+
+function TabBtn({ id, cur, set, Icon, label }) {
+  const on = cur === id;
+  return (
+    <button onClick={() => set(id)}
+      className={`px-4 py-2.5 text-xs uppercase tracking-wider font-medium flex items-center gap-2 border-b-2 -mb-px transition-colors ${on ? 'border-slate-900 text-slate-900' : 'border-transparent text-stone-500 hover:text-stone-900'}`}>
+      <Icon className="w-3.5 h-3.5" />{label}
+    </button>
+  );
+}
+
+function EmptyState({ hint }) {
+  return (
+    <div className="bg-white border border-stone-300 rounded-sm p-12 text-center">
+      <IconUpload className="w-8 h-8 mx-auto text-stone-400 mb-3" />
+      <h2 className="font-display text-lg">No data yet</h2>
+      <p className="text-sm text-stone-500 mt-1">{hint || 'Configure your Sheet in Setup, or drop a CSV to start.'}</p>
+    </div>
+  );
+}
+
+function KPI({ label, value, sub, tone, blurred }) {
+  const colour = tone === 'over' ? 'text-red-700' : tone === 'under' ? 'text-emerald-700' : 'text-stone-900';
+  const blurClass    = blurred ? 'blur-md select-none transition-all duration-200' : 'transition-all duration-200';
+  const blurClassSub = blurred ? 'blur-sm select-none transition-all duration-200' : 'transition-all duration-200';
+  return (
+    <div className="bg-white border border-stone-300 rounded-sm p-4">
+      <div className="text-xs uppercase tracking-wider text-stone-500">{label}</div>
+      <div className={`font-num text-2xl mt-1 ${colour} ${blurClass}`}>{fmt(value)}</div>
+      {sub && <div className={`text-xs text-stone-500 mt-1 ${blurClassSub}`}>{sub}</div>}
+    </div>
+  );
+}
+
+function StatusPill({ status }) {
+  if (status === 'OVER')     return <span className="inline-block px-2 py-0.5 text-xs uppercase tracking-wider bg-red-50 text-red-800 border border-red-200">over</span>;
+  if (status === 'under')    return <span className="inline-block px-2 py-0.5 text-xs uppercase tracking-wider bg-emerald-50 text-emerald-800 border border-emerald-200">under</span>;
+  if (status === 'on track') return <span className="inline-block px-2 py-0.5 text-xs uppercase tracking-wider bg-stone-100 text-stone-700 border border-stone-200">on track</span>;
+  return <span className="text-stone-400 text-xs">—</span>;
+}
+
+function Field({ label, children }) {
+  return <div className="flex flex-col gap-1"><span className="text-xs uppercase tracking-wider text-stone-500">{label}</span>{children}</div>;
+}
+
+/* ============================================================================
+   Dashboard
+   ========================================================================== */
+function Dashboard({ budget, actuals, settings, dateRange, setDateRange, defaultRange, windowTxs, allCycles, cycleActuals, hasData, privateMode, setPrivateMode }) {
+  if (!hasData) return <EmptyState />;
+
+  const stepCycle = (dir) => {
+    const cur = parseISO(dateRange.from);
+    if (!cur) return;
+    const newStart = new Date(cur.getFullYear(), cur.getMonth() + dir, cur.getDate());
+    const newEndExcl = new Date(newStart.getFullYear(), newStart.getMonth() + 1, newStart.getDate());
+    const newEndIncl = new Date(newEndExcl);
+    newEndIncl.setDate(newEndIncl.getDate() - 1);
+    setDateRange({ from: toISO(newStart), to: toISO(newEndIncl) });
+  };
+
+  const totalBudget = budget.reduce((s, b) => s + b.amount, 0);
+  const totalActual = budget.filter(b => b.line !== 'Reimbursable').reduce((s, b) => s + (actuals[b.line] || 0), 0);
+  const gap         = settings.netIncome - totalActual;
+  const budgetGap   = settings.netIncome - totalBudget;
+
+  const bokTx = windowTxs.filter(t => t.line === 'Bok Fonds' && t.amount < 0).sort((a, b) => a.date.localeCompare(b.date));
+  const bokBudget = budget.find(b => b.line === 'Bok Fonds')?.amount || 0;
+  let bokRun = 0;
+  const bokWithRun = bokTx.map(t => { bokRun += Math.abs(t.amount); return { ...t, running: bokRun }; });
+
+  return (
+    <div className="space-y-6">
+      <div className="bg-white border border-stone-300 rounded-sm p-4 flex items-center gap-3 flex-wrap">
+        <div className="text-xs uppercase tracking-wider text-stone-500">Window</div>
+        <input type="date" value={dateRange.from} onChange={e => setDateRange({ ...dateRange, from: e.target.value })} className="px-2 py-1 border border-stone-300 text-sm font-num" />
+        <span className="text-stone-400">→</span>
+        <input type="date" value={dateRange.to} onChange={e => setDateRange({ ...dateRange, to: e.target.value })} className="px-2 py-1 border border-stone-300 text-sm font-num" />
+        <div className="flex items-center gap-1 ml-2">
+          <button onClick={() => stepCycle(-1)} className="px-2 py-1 text-xs border border-stone-300 hover:bg-stone-100">← prev cycle</button>
+          <button onClick={() => setDateRange(defaultRange)} className="px-2 py-1 text-xs border border-stone-300 hover:bg-stone-100">current</button>
+          <button onClick={() => stepCycle(1)} className="px-2 py-1 text-xs border border-stone-300 hover:bg-stone-100">next cycle →</button>
+        </div>
+        <div className="ml-auto flex items-center gap-3">
+          <span className="text-xs text-stone-500">{windowTxs.length} txs · anchor day {settings.anchorDay}</span>
+          <button
+            onClick={() => setPrivateMode(!privateMode)}
+            title={privateMode ? 'Show amounts' : 'Hide amounts'}
+            className="p-1.5 border border-stone-300 text-stone-600 hover:bg-stone-100 hover:text-stone-900">
+            {privateMode ? <IconEyeOff className="w-4 h-4" /> : <IconEye className="w-4 h-4" />}
+          </button>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <KPI label="Net income"            value={settings.netIncome} tone="neutral"                                                              blurred={privateMode} />
+        <KPI label="Budgeted spend"        value={totalBudget}        tone="neutral" sub={`Surplus on paper: ${fmtSigned(budgetGap)}`}            blurred={privateMode} />
+        <KPI label="Actual spend (window)" value={totalActual}        tone={totalActual > totalBudget ? 'over' : 'under'} sub={`${prettyDate(dateRange.from)} → ${prettyDate(dateRange.to)}`} blurred={privateMode} />
+        <KPI label="Real gap"              value={gap}                tone={gap < 0 ? 'over' : 'under'} sub={gap < 0 ? 'spending exceeds income' : 'within income'}                              blurred={privateMode} />
+      </div>
+
+      <div className="bg-white border border-stone-300 rounded-sm overflow-hidden">
+        <div className="px-5 py-3 border-b border-stone-200 flex items-center justify-between">
+          <h2 className="font-display text-lg">Budget vs Actual (selected window)</h2>
+          <div className="text-xs text-stone-500">{prettyDate(dateRange.from)} → {prettyDate(dateRange.to)}</div>
+        </div>
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-xs uppercase tracking-wider text-stone-500 border-b border-stone-200">
+              <th className="text-left px-5 py-2 font-medium">Line</th>
+              <th className="text-right px-3 py-2 font-medium">Budget</th>
+              <th className="text-right px-3 py-2 font-medium">Actual</th>
+              <th className="text-right px-3 py-2 font-medium">Variance</th>
+              <th className="text-right px-3 py-2 font-medium">%</th>
+              <th className="text-center px-5 py-2 font-medium">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {budget.map(b => {
+              const act = actuals[b.line] || 0;
+              const variance = b.amount - act;
+              const pct = b.amount > 0 ? (act / b.amount) : 0;
+              let status = '—';
+              if (b.amount > 0) {
+                if (act > b.amount * 1.05) status = 'OVER';
+                else if (act < b.amount * 0.95) status = 'under';
+                else status = 'on track';
+              }
+              return (
+                <tr key={b.line} className="border-b border-stone-100 hover:bg-stone-50">
+                  <td className="px-5 py-2">{b.line}</td>
+                  <td className="px-3 py-2 text-right font-num text-stone-700">{fmt(b.amount)}</td>
+                  <td className="px-3 py-2 text-right font-num">{fmt(act)}</td>
+                  <td className={`px-3 py-2 text-right font-num ${variance < 0 ? 'text-red-700' : 'text-stone-700'}`}>{fmtSigned(variance)}</td>
+                  <td className="px-3 py-2 text-right font-num text-stone-500 text-xs">{b.amount > 0 ? `${(pct * 100).toFixed(0)}%` : '–'}</td>
+                  <td className="px-5 py-2 text-center"><StatusPill status={status} /></td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {allCycles.length > 1 && (
+        <div className="bg-white border border-stone-300 rounded-sm overflow-hidden">
+          <div className="px-5 py-3 border-b border-stone-200 flex items-center justify-between">
+            <h2 className="font-display text-lg">By cycle</h2>
+            <div className="text-xs text-stone-500">Pay-cycle totals (anchor day {settings.anchorDay})</div>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-xs uppercase tracking-wider text-stone-500 border-b border-stone-200">
+                  <th className="text-left px-5 py-2 font-medium">Line</th>
+                  {allCycles.map(c => <th key={c} className="text-right px-3 py-2 font-medium whitespace-nowrap">{prettyCycle(c, settings.anchorDay)}</th>)}
+                </tr>
+              </thead>
+              <tbody>
+                {budget.map(b => (
+                  <tr key={b.line} className="border-b border-stone-100">
+                    <td className="px-5 py-1.5">{b.line}</td>
+                    {allCycles.map(c => (
+                      <td key={c} className="px-3 py-1.5 text-right font-num">
+                        {fmt(cycleActuals[c]?.[b.line] || 0)}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {bokWithRun.length > 0 && (
+        <div className="bg-white border border-stone-300 rounded-sm overflow-hidden">
+          <div className="px-5 py-3 border-b border-stone-200">
+            <h2 className="font-display text-lg">Bok Fonds running watch</h2>
+            <div className="text-xs text-stone-500 mt-0.5">Red row = running total has passed R{bokBudget.toLocaleString()} for the selected window.</div>
+          </div>
+          <div className="max-h-96 overflow-y-auto">
+            <table className="w-full text-sm">
+              <thead className="sticky top-0 bg-white">
+                <tr className="text-xs uppercase tracking-wider text-stone-500 border-b border-stone-200">
+                  <th className="text-left px-5 py-2 font-medium">Date</th>
+                  <th className="text-left px-3 py-2 font-medium">Description</th>
+                  <th className="text-right px-3 py-2 font-medium">Amount</th>
+                  <th className="text-right px-5 py-2 font-medium">Running</th>
+                </tr>
+              </thead>
+              <tbody>
+                {bokWithRun.map((t, i) => {
+                  const over = t.running > bokBudget;
+                  return (
+                    <tr key={t.hash || i} className={`border-b border-stone-100 ${over ? 'bg-red-50' : ''}`}>
+                      <td className="px-5 py-1.5 font-num text-stone-600 text-xs">{t.date}</td>
+                      <td className="px-3 py-1.5 truncate max-w-md">{t.description}</td>
+                      <td className="px-3 py-1.5 text-right font-num">{fmt(Math.abs(t.amount))}</td>
+                      <td className={`px-5 py-1.5 text-right font-num font-medium ${over ? 'text-red-700' : ''}`}>{fmt(t.running)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ============================================================================
+   Transactions
+   ========================================================================== */
+function Transactions({ allTxs, lineNames, overrides, setOverride, clearOverride, anchorDay, onPostToHistory, onEditHistoryLine, onDeleteHistoryRow, posting, newCount, newClassifiedCount, stillNeedingReview }) {
+  const [filterLine, setFL]     = useState('');
+  const [filterCycle, setFC]    = useState('');
+  const [filterStatus, setFS]   = useState('');
+  const [search, setSearch]     = useState('');
+
+  const cycles = useMemo(() => {
+    const s = new Set();
+    for (const t of allTxs) if (t.date) s.add(cycleKey(t.date, anchorDay));
+    return Array.from(s).sort().reverse();
+  }, [allTxs, anchorDay]);
+
+  const filtered = useMemo(() => allTxs
+    .filter(t => !filterLine   || t.line === filterLine)
+    .filter(t => !filterCycle  || cycleKey(t.date, anchorDay) === filterCycle)
+    .filter(t => !filterStatus || (filterStatus === 'new' && !t.inHistory) || (filterStatus === 'history' && t.inHistory))
+    .filter(t => !search       || (t.description || '').toLowerCase().includes(search.toLowerCase()) || (t.originalDesc || '').toLowerCase().includes(search.toLowerCase())),
+    [allTxs, filterLine, filterCycle, filterStatus, search, anchorDay]);
+
+  if (!allTxs.length) return <EmptyState />;
+
+  return (
+    <div className="space-y-4">
+      <div className="bg-white border border-stone-300 rounded-sm p-4 flex items-center gap-3 flex-wrap">
+        <button
+          onClick={onPostToHistory}
+          disabled={posting || newClassifiedCount === 0}
+          className={`px-4 py-2 text-xs uppercase tracking-wider font-medium border flex items-center gap-1.5 ${newClassifiedCount > 0 && !posting ? 'border-slate-800 bg-slate-800 text-white hover:bg-slate-700' : 'border-stone-300 text-stone-400 cursor-not-allowed'}`}>
+          <IconUpload className="w-3.5 h-3.5" />
+          {posting ? 'Posting…' : `Post ${newClassifiedCount} classified row${newClassifiedCount === 1 ? '' : 's'} to history`}
+        </button>
+        <div className="text-xs text-stone-600">
+          {newCount === 0
+            ? 'Nothing new — everything visible is already in history.'
+            : stillNeedingReview > 0
+              ? <>still <span className="text-amber-700 font-medium">{stillNeedingReview}</span> tagged "Review" — classify them before posting</>
+              : <>all {newClassifiedCount} new rows ready to post</>}
+        </div>
+      </div>
+
+      <div className="bg-white border border-stone-300 rounded-sm overflow-hidden">
+        <div className="px-5 py-3 border-b border-stone-200 flex items-center justify-between flex-wrap gap-2">
+          <h2 className="font-display text-lg">Transactions</h2>
+          <div className="flex items-center gap-2 flex-wrap text-xs">
+            <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search description…" className="px-2 py-1 border border-stone-300 text-sm w-44" />
+            <select value={filterCycle} onChange={e => setFC(e.target.value)} className="px-2 py-1 border border-stone-300 text-sm">
+              <option value="">All cycles</option>{cycles.map(c => <option key={c} value={c}>{prettyCycle(c, anchorDay)}</option>)}
+            </select>
+            <select value={filterLine} onChange={e => setFL(e.target.value)} className="px-2 py-1 border border-stone-300 text-sm">
+              <option value="">All lines</option>{lineNames.map(l => <option key={l}>{l}</option>)}
+            </select>
+            <select value={filterStatus} onChange={e => setFS(e.target.value)} className="px-2 py-1 border border-stone-300 text-sm">
+              <option value="">All status</option>
+              <option value="new">New (not posted)</option>
+              <option value="history">In history</option>
+            </select>
+            <span className="text-stone-500 font-num">{filtered.length} of {allTxs.length}</span>
+          </div>
+        </div>
+        <div className="overflow-x-auto" style={{ maxHeight: '70vh', overflowY: 'auto' }}>
+          <table className="w-full text-sm">
+            <thead className="sticky top-0 bg-white z-10">
+              <tr className="text-xs uppercase tracking-wider text-stone-500 border-b border-stone-200">
+                <th className="text-left px-5 py-2 font-medium">Date</th>
+                <th className="text-left px-3 py-2 font-medium">Account</th>
+                <th className="text-left px-3 py-2 font-medium">Description</th>
+                <th className="text-left px-3 py-2 font-medium">Bank cat</th>
+                <th className="text-right px-3 py-2 font-medium">Amount</th>
+                <th className="text-left px-5 py-2 font-medium">Budget line</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.slice(0, 500).map((t) => {
+                const overridden = !!overrides[t.hash];
+                return (
+                  <tr key={t.hash} className={`border-b border-stone-100 ${t.inHistory ? 'bg-stone-50/60' : 'hover:bg-stone-50'}`}>
+                    <td className="px-5 py-1.5 font-num text-xs text-stone-600">{t.date}</td>
+                    <td className="px-3 py-1.5 text-xs text-stone-500">{t.account}</td>
+                    <td className="px-3 py-1.5 truncate" style={{ maxWidth: '20rem' }} title={`${t.description}${t.originalDesc && t.originalDesc !== t.description ? '\n' + t.originalDesc : ''}`}>{t.description}</td>
+                    <td className="px-3 py-1.5 text-xs text-stone-500">{t.bankCategory}</td>
+                    <td className={`px-3 py-1.5 text-right font-num ${t.amount < 0 ? 'text-stone-900' : 'text-emerald-700'}`}>{fmt(t.amount, 2)}</td>
+                    <td className="px-5 py-1.5">
+                      {t.inHistory ? (
+                        <div className="flex items-center gap-2">
+                          <select value={t.line} onChange={e => onEditHistoryLine(t.hash, e.target.value)}
+                                  className="px-2 py-1 border border-stone-300 bg-white text-xs font-medium">
+                            {lineNames.includes(t.line) ? null : <option value={t.line}>{t.line}</option>}
+                            {lineNames.map(l => <option key={l} value={l}>{l}</option>)}
+                            <option value="Salary">Salary</option>
+                            <option value="Other Income">Other Income</option>
+                          </select>
+                          <span className="inline-block px-1.5 py-0.5 text-[10px] uppercase tracking-wider bg-stone-200 text-stone-600 border border-stone-300">in history</span>
+                          <button onClick={() => { if (confirm('Remove this row from history? This deletes it from the Google Sheet.')) onDeleteHistoryRow(t.hash); }}
+                                  className="text-stone-400 hover:text-red-700" title="Remove from history">
+                            <IconTrash className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-2">
+                          <select value={t.line} onChange={e => setOverride(t.hash, e.target.value)}
+                                  className={`px-2 py-1 border text-xs font-medium ${
+                                    t.line === 'Review' ? 'border-red-400 bg-red-50'
+                                    : overridden ? 'border-amber-400 bg-amber-50'
+                                    : 'border-stone-300 bg-white'
+                                  }`}>
+                            {lineNames.includes(t.line) ? null : <option value={t.line}>{t.line}</option>}
+                            {lineNames.map(l => <option key={l} value={l}>{l}</option>)}
+                            <option value="Salary">Salary</option>
+                            <option value="Other Income">Other Income</option>
+                          </select>
+                          {overridden && <button onClick={() => clearOverride(t.hash)} title="Clear override" className="text-amber-700 hover:text-amber-900"><IconX className="w-3.5 h-3.5" /></button>}
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          {filtered.length > 500 && <div className="px-5 py-2 text-xs text-stone-500 bg-stone-50">Showing first 500 of {filtered.length} — narrow filters to see the rest.</div>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================================
+   Rules editor
+   ========================================================================== */
+function RulesEditor({ rules, lineNames, onSave, saving }) {
+  const [draft, setDraft]   = useState(rules);
+  const [nr, setNr]         = useState({ line: lineNames[0] || 'Review', type: 'desc', value: '' });
+
+  useEffect(() => setDraft(rules), [rules]);
+
+  const dirty = JSON.stringify(draft) !== JSON.stringify(rules);
+
+  const add = () => {
+    if (!nr.value.trim()) return;
+    setDraft([...draft, { ...nr, value: nr.value.trim() }]);
+    setNr({ ...nr, value: '' });
+  };
+  const del = (i) => setDraft(draft.filter((_, j) => j !== i));
+
+  return (
+    <div className="space-y-4">
+      <div className="bg-white border border-stone-300 rounded-sm p-5">
+        <div className="flex items-center justify-between mb-1">
+          <h2 className="font-display text-lg">Add a rule</h2>
+          <button onClick={() => onSave(draft)} disabled={!dirty || saving} className={`px-3 py-1.5 text-xs uppercase tracking-wider font-medium border ${dirty && !saving ? 'border-slate-800 bg-slate-800 text-white hover:bg-slate-700' : 'border-stone-300 text-stone-400 cursor-not-allowed'}`}>
+            {saving ? 'Saving…' : dirty ? 'Save to Sheet' : 'Saved'}
+          </button>
+        </div>
+        <p className="text-xs text-stone-500 mb-3">First match wins. <span className="font-medium">desc</span> = substring on Description or Original Description. <span className="font-medium">cat</span> = exact Capitec Category. <span className="font-medium">pcat</span> = exact Parent Category.</p>
+        <div className="flex items-end gap-2 flex-wrap">
+          <Field label="Budget line">
+            <select value={nr.line} onChange={e => setNr({ ...nr, line: e.target.value })} className="px-2 py-1.5 border border-stone-300 text-sm">
+              {lineNames.map(l => <option key={l}>{l}</option>)}
+            </select>
+          </Field>
+          <Field label="Match type">
+            <select value={nr.type} onChange={e => setNr({ ...nr, type: e.target.value })} className="px-2 py-1.5 border border-stone-300 text-sm">
+              <option value="desc">desc</option><option value="cat">cat</option><option value="pcat">pcat</option>
+            </select>
+          </Field>
+          <Field label="Match value">
+            <input value={nr.value} onChange={e => setNr({ ...nr, value: e.target.value })}
+                   placeholder={nr.type === 'desc' ? 'e.g. shoprite' : 'e.g. Groceries'}
+                   className="px-2 py-1.5 border border-stone-300 text-sm w-56" />
+          </Field>
+          <button onClick={add} className="px-3 py-1.5 text-xs uppercase tracking-wider font-medium border border-slate-800 text-slate-800 hover:bg-slate-800 hover:text-stone-50 flex items-center gap-1.5">
+            <IconPlus className="w-3.5 h-3.5" />Add
+          </button>
+        </div>
+      </div>
+
+      <div className="bg-white border border-stone-300 rounded-sm overflow-hidden">
+        <div className="px-5 py-3 border-b border-stone-200 flex items-center justify-between">
+          <h2 className="font-display text-lg">Rules <span className="text-stone-500 text-sm font-normal">({draft.length})</span></h2>
+          {dirty && <span className="text-xs text-amber-700">unsaved changes</span>}
+        </div>
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-xs uppercase tracking-wider text-stone-500 border-b border-stone-200">
+              <th className="text-left px-5 py-2 font-medium" style={{ width: '3rem' }}>#</th>
+              <th className="text-left px-3 py-2 font-medium">Budget line</th>
+              <th className="text-left px-3 py-2 font-medium">Type</th>
+              <th className="text-left px-3 py-2 font-medium">Match value</th>
+              <th className="text-right px-5 py-2 font-medium" style={{ width: '4rem' }}></th>
+            </tr>
+          </thead>
+          <tbody>
+            {draft.map((r, i) => (
+              <tr key={i} className="border-b border-stone-100 hover:bg-stone-50">
+                <td className="px-5 py-1.5 text-stone-400 font-num text-xs">{i + 1}</td>
+                <td className="px-3 py-1.5">{r.line}</td>
+                <td className="px-3 py-1.5 text-stone-500 text-xs uppercase tracking-wider">{r.type}</td>
+                <td className="px-3 py-1.5 font-num text-stone-700">{r.value}</td>
+                <td className="px-5 py-1.5 text-right">
+                  <button onClick={() => del(i)} className="text-stone-400 hover:text-red-700"><IconTrash className="w-3.5 h-3.5" /></button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================================
+   Budget editor (also handles net income + anchor day)
+   ========================================================================== */
+function BudgetEditor({ budget, settings, onSave, saving }) {
+  const [draftBudget, setDraftBudget]     = useState(budget);
+  const [draftSettings, setDraftSettings] = useState(settings);
+  const [newLine, setNewLine]             = useState('');
+
+  useEffect(() => setDraftBudget(budget),     [budget]);
+  useEffect(() => setDraftSettings(settings), [settings]);
+
+  const dirty =
+    JSON.stringify(draftBudget) !== JSON.stringify(budget) ||
+    JSON.stringify(draftSettings) !== JSON.stringify(settings);
+
+  const setAmount  = (line, v) => setDraftBudget(draftBudget.map(b => b.line === line ? { ...b, amount: parseFloat(v) || 0 } : b));
+  const renameLine = (oldLine, newName) => { if (!newName.trim() || newName === oldLine) return; setDraftBudget(draftBudget.map(b => b.line === oldLine ? { ...b, line: newName } : b)); };
+  const deleteLine = (line)    => setDraftBudget(draftBudget.filter(b => b.line !== line));
+  const addLine    = ()        => { if (!newLine.trim() || draftBudget.some(b => b.line === newLine)) return; setDraftBudget([...draftBudget, { line: newLine.trim(), amount: 0 }]); setNewLine(''); };
+
+  const total = draftBudget.reduce((s, b) => s + b.amount, 0);
+  const surplus = draftSettings.netIncome - total;
+
+  return (
+    <div className="space-y-4">
+      <div className="grid md:grid-cols-3 gap-3">
+        <KPI label="Net income"       value={draftSettings.netIncome} tone="neutral" />
+        <KPI label="Total budget"     value={total}                   tone="neutral" />
+        <KPI label="Surplus on paper" value={surplus}                 tone={surplus < 0 ? 'over' : 'under'} sub={surplus < 0 ? 'budget exceeds income' : 'within income'} />
+      </div>
+
+      <div className="bg-white border border-stone-300 rounded-sm p-5">
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="font-display text-lg">Income & cycle</h2>
+          <button onClick={() => onSave(draftBudget, draftSettings)} disabled={!dirty || saving} className={`px-3 py-1.5 text-xs uppercase tracking-wider font-medium border ${dirty && !saving ? 'border-slate-800 bg-slate-800 text-white hover:bg-slate-700' : 'border-stone-300 text-stone-400 cursor-not-allowed'}`}>
+            {saving ? 'Saving…' : dirty ? 'Save to Sheet' : 'Saved'}
+          </button>
+        </div>
+        <div className="flex items-end gap-6 flex-wrap">
+          <Field label="Net income (monthly)">
+            <input type="number" value={draftSettings.netIncome} onChange={e => setDraftSettings({ ...draftSettings, netIncome: parseFloat(e.target.value) || 0 })} className="px-3 py-2 border border-stone-300 font-num text-lg w-48" />
+          </Field>
+          <Field label="Cycle anchor day (1–28)">
+            <input type="number" min="1" max="28" value={draftSettings.anchorDay} onChange={e => setDraftSettings({ ...draftSettings, anchorDay: Math.max(1, Math.min(28, parseInt(e.target.value, 10) || 25)) })} className="px-3 py-2 border border-stone-300 font-num text-lg w-24" />
+          </Field>
+          <div className="text-xs text-stone-500 max-w-md">Each cycle runs from the anchor day of one month to the day before the anchor in the next month. You're paid on the 25th, so 25 is the natural choice.</div>
+        </div>
+      </div>
+
+      <div className="bg-white border border-stone-300 rounded-sm overflow-hidden">
+        <div className="px-5 py-3 border-b border-stone-200 flex items-center justify-between">
+          <h2 className="font-display text-lg">Budget lines</h2>
+          {dirty && <span className="text-xs text-amber-700">unsaved changes</span>}
+        </div>
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-xs uppercase tracking-wider text-stone-500 border-b border-stone-200">
+              <th className="text-left px-5 py-2 font-medium">Line</th>
+              <th className="text-right px-3 py-2 font-medium">Monthly budget (R)</th>
+              <th className="text-right px-5 py-2 font-medium" style={{ width: '4rem' }}></th>
+            </tr>
+          </thead>
+          <tbody>
+            {draftBudget.map(b => (
+              <tr key={b.line} className="border-b border-stone-100 hover:bg-stone-50">
+                <td className="px-5 py-1.5">
+                  <input defaultValue={b.line} onBlur={e => renameLine(b.line, e.target.value)} className="px-2 py-1 border border-transparent hover:border-stone-300 focus:border-stone-300 text-sm w-44 bg-transparent" />
+                </td>
+                <td className="px-3 py-1.5 text-right">
+                  <input type="number" value={b.amount} onChange={e => setAmount(b.line, e.target.value)} className="px-2 py-1 border border-stone-300 font-num text-sm w-32 text-right" />
+                </td>
+                <td className="px-5 py-1.5 text-right">
+                  <button onClick={() => deleteLine(b.line)} className="text-stone-400 hover:text-red-700"><IconTrash className="w-3.5 h-3.5" /></button>
+                </td>
+              </tr>
+            ))}
+            <tr className="bg-stone-100 font-medium">
+              <td className="px-5 py-2">Total budget</td>
+              <td className="px-3 py-2 text-right font-num">{fmt(total)}</td>
+              <td></td>
+            </tr>
+            <tr className="bg-stone-50 text-stone-600">
+              <td className="px-5 py-1.5 text-sm">Net income</td>
+              <td className="px-3 py-1.5 text-right font-num text-sm">{fmt(draftSettings.netIncome)}</td>
+              <td></td>
+            </tr>
+            <tr className={`font-medium ${surplus < 0 ? 'bg-red-50' : 'bg-emerald-50'}`}>
+              <td className={`px-5 py-2 ${surplus < 0 ? 'text-red-800' : 'text-emerald-800'}`}>
+                {surplus < 0 ? 'Over budget by' : 'Surplus left over'}
+              </td>
+              <td className={`px-3 py-2 text-right font-num ${surplus < 0 ? 'text-red-800' : 'text-emerald-800'}`}>
+                {fmt(Math.abs(surplus))}
+              </td>
+              <td></td>
+            </tr>
+          </tbody>
+        </table>
+        <div className="px-5 py-3 border-t border-stone-200 flex items-center gap-2">
+          <input value={newLine} onChange={e => setNewLine(e.target.value)} placeholder="Add new budget line…" className="px-2 py-1.5 border border-stone-300 text-sm w-60" />
+          <button onClick={addLine} className="px-3 py-1.5 text-xs uppercase tracking-wider font-medium border border-slate-800 text-slate-800 hover:bg-slate-800 hover:text-stone-50 flex items-center gap-1.5"><IconPlus className="w-3.5 h-3.5" />Add line</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================================
+   Setup panel
+   ========================================================================== */
+function SetupPanel({ config, setConfig, onSync, onReload, loading, hasData }) {
+  const [draft, setDraft] = useState(config);
+  useEffect(() => setDraft(config), [config]);
+  const dirty = draft.sheetUrl !== config.sheetUrl || draft.sheetToken !== config.sheetToken;
+
+  return (
+    <div className="space-y-4 max-w-3xl">
+      <div className="bg-white border border-stone-300 rounded-sm p-5">
+        <h2 className="font-display text-lg mb-2">Sheet connection</h2>
+        <p className="text-xs text-stone-500 mb-4">Paste the Web app URL from your Apps Script deployment, and the same SHARED_TOKEN string you set inside the script. Both are saved in this browser only.</p>
+
+        <div className="space-y-3">
+          <Field label="Apps Script web-app URL">
+            <input value={draft.sheetUrl} onChange={e => setDraft({ ...draft, sheetUrl: e.target.value })} placeholder="https://script.google.com/macros/s/.../exec" className="px-2 py-1.5 border border-stone-300 text-sm font-num w-full" />
+          </Field>
+          <Field label="Shared token">
+            <input type="password" value={draft.sheetToken} onChange={e => setDraft({ ...draft, sheetToken: e.target.value })} placeholder="paste SHARED_TOKEN from apps_script.gs" className="px-2 py-1.5 border border-stone-300 text-sm font-num w-full" />
+          </Field>
+        </div>
+
+        <div className="mt-4 flex items-center gap-2 flex-wrap">
+          <button onClick={() => setConfig(draft)} disabled={!dirty} className={`px-3 py-1.5 text-xs uppercase tracking-wider font-medium border ${dirty ? 'border-slate-800 bg-slate-800 text-white hover:bg-slate-700' : 'border-stone-300 text-stone-400 cursor-not-allowed'}`}>
+            {dirty ? 'Save & connect' : 'Saved'}
+          </button>
+          <button onClick={onReload} disabled={loading || !config.sheetUrl} className="px-3 py-1.5 text-xs uppercase tracking-wider font-medium border border-stone-300 text-stone-700 hover:bg-stone-100 disabled:opacity-50">
+            Reload sheet
+          </button>
+          <button onClick={onSync} disabled={loading || !config.sheetUrl} className="px-3 py-1.5 text-xs uppercase tracking-wider font-medium border border-slate-800 text-slate-800 hover:bg-slate-800 hover:text-stone-50 disabled:opacity-50 flex items-center gap-1.5">
+            <IconRefresh className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />Sync from Gmail now
+          </button>
+        </div>
+
+        {hasData && config.sheetUrl && (
+          <div className="mt-4 text-xs text-emerald-700 flex items-center gap-1.5">
+            <IconCheck className="w-3.5 h-3.5" />Connected and data loaded.
+          </div>
+        )}
+      </div>
+
+      <div className="bg-white border border-stone-300 rounded-sm p-5 text-xs text-stone-600 space-y-3">
+        <h3 className="font-display text-base text-stone-900">First-time setup</h3>
+        <ol className="list-decimal pl-5 space-y-1.5">
+          <li>Create a fresh Google Sheet, name it (e.g.) "Budget Tracker 2026".</li>
+          <li>Inside the Sheet: <span className="font-num">Extensions → Apps Script</span>. Delete the placeholder code, paste in <span className="font-num bg-stone-100 px-1">apps_script.gs</span> from this folder.</li>
+          <li>At the top of the script, set <span className="font-num bg-stone-100 px-1">SHARED_TOKEN</span> to a long random string (any password generator works). Save (Ctrl+S).</li>
+          <li>Click <span className="font-num">Deploy → New deployment</span>. Gear icon → <span className="font-num">Web app</span>. Execute as: <em>Me</em>. Who has access: <em>Anyone with the link</em>. Click <span className="font-num">Deploy</span>.</li>
+          <li>Google will show "this app isn't verified" the first time — click <span className="font-num">Advanced → Go to project (unsafe) → Allow</span>. This is normal for personal Apps Script projects (your own code, your own data).</li>
+          <li>Copy the Web app URL. Paste it above. Paste the same SHARED_TOKEN string into the token field. Click <span className="font-num">Save &amp; connect</span>.</li>
+          <li>Close + reopen the Sheet once. <span className="font-num">onOpen()</span> fires: the five tabs auto-create (<span className="font-num">Bank Statement, Transactions, Budget, Rules, Settings</span>) and Gmail starts getting pulled.</li>
+          <li>Back here, click <span className="font-num">Reload sheet</span> — you should see your budget lines and rules appear.</li>
+        </ol>
+        <div className="pt-2 border-t border-stone-200 text-stone-500">
+          <p>What goes where: raw Gmail pulls land in <span className="font-num">Bank Statement</span> (cleared & refilled every time the Sheet opens). Classified rows live in <span className="font-num">Transactions</span> (your long-term history; only this app's "Post to history" button writes here). Budget, Rules, and Settings each have their own tab.</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================================
+   Boot
+   ========================================================================== */
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<BudgetTracker />);
+</script>
+</body>
+</html>

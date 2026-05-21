@@ -1,0 +1,21 @@
+# Secrets — Web App URL and SHARED_TOKEN live here. Never commit.
+keys.txt
+
+# Personal bank statement CSVs
+*.csv
+account_statement*.csv
+
+# OS junk
+Thumbs.db
+.DS_Store
+
+# Editor / IDE
+.vscode/
+.idea/
+
+# Images and logo working files — keep out of the repo
+*.png
+*.jpg
+*.jpeg
+*.gif
+logo_b64.txt
