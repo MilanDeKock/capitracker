@@ -2,9 +2,7 @@
 
 > To Keep the Budget Lekker.
 
-**Try it live:**
-- 🪙 **App:** https://milandekock.github.io/capitracker/budget_tracker.html
-- 🛠️ **Setup wizard (first-time users):** https://milandekock.github.io/capitracker/setup_wizard.html
+🪙 **Try it live:** **https://milandekock.github.io/capitracker/**
 
 A single-file budget tracker for South African bank statements. Reads CSVs you email to yourself, classifies them with simple rules, and shows you how the current pay cycle is tracking against your budget.
 
