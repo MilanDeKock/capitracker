@@ -79,6 +79,16 @@ setup_wizard.html     Optional first-run setup helper
 keys.txt              YOUR token + Web App URL (gitignored, do not commit)
 ```
 
+## Contributing — help make this work for your bank
+
+Right now CapiTracker only really works with Capitec CSVs. If you bank elsewhere and want to use this — **open an issue or a PR**. The kind of contributions that are welcome:
+
+- **Other SA bank parsers** — FNB, Standard Bank, Nedbank, ABSA, Investec, Discovery, TymeBank. The bank-specific bit lives in the CSV ingest inside `apps_script.gs`. Everything else is bank-agnostic.
+- **Bug reports** — anything weird, broken, or confusing, drop it in [Issues](https://github.com/MilanDeKock/capitracker/issues).
+- **Feature ideas** — pay-cycle visualisations, alerts, mobile polish, export options. Open an issue first so we can chat before you build.
+
+**The vision:** a free, open-source budgeting tool that works for every SA bank's CSV. You set it up yourself — which is half the fun — and the data stays in your own Google Sheet. No subscriptions and accounts.
+
 ## License
 
 MIT — see [`LICENSE`](LICENSE).
