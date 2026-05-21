@@ -52,7 +52,11 @@ Bank emails CSV → Apps Script ingests → Google Sheet (canonical store)
 
 ### 3. Send your bank CSVs to your Gmail
 
-Whatever email the Sheet/Apps Script lives under — send `account_statement_*.csv` attachments to that address. The Apps Script picks them up on Sheet open (or whenever the app calls "Refresh").
+Send `account_statement_*.csv` attachments to the **same Gmail address** that owns the Apps Script. The script searches its own inbox using `from:me`, so the email must come *from* that address (sent to itself is fine — it's still "from me").
+
+> **Gotcha:** if you have multiple Gmail accounts and forward the CSV from a different one (e.g. work → personal), the script won't find it. Either send from the same account, or edit `GMAIL_QUERY` in your `apps_script.gs` to use `to:me` instead.
+
+The Apps Script picks new attachments up on Sheet open, or whenever the app calls "Sync Gmail".
 
 ## Features
 

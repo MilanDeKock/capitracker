@@ -596,9 +596,12 @@ function Wizard() {
           <h3 className="text-xs uppercase tracking-wider text-stone-500 mb-3">Your first transactions</h3>
           <ol className="text-sm text-stone-700 space-y-1.5 pl-4 list-decimal">
             <li>Open your banking app, export the last 30 days as CSV.</li>
-            <li>Email it to yourself (any subject, attach the CSV).</li>
+            <li>Email it <strong>from the same Gmail address</strong> that owns this script (the one you just authorized). Any subject, attach the CSV.</li>
             <li>Open CapiTracker, hit <strong>Sync Gmail</strong>. Done.</li>
           </ol>
+          <div className="text-xs text-stone-500 mt-4 pt-3 border-t border-stone-100">
+            <strong>Why from the same address?</strong> The script searches its own inbox using <code className="font-num bg-stone-100 px-1">from:me</code>. If you send the CSV from a different Gmail (e.g. work account) to this one, the script won't find it. Either send from this account, or edit <code className="font-num bg-stone-100 px-1">GMAIL_QUERY</code> in the script to <code className="font-num bg-stone-100 px-1">to:me</code>.
+          </div>
         </div>
 
         <div className="flex items-center justify-center gap-3">
