@@ -199,6 +199,7 @@
     try {
       if (action === 'load') return jsonOut_(loadAll_());
       if (action === 'pull') { pullStatements_(); return jsonOut_(loadAll_()); }
+      if (action === 'ping') return jsonOut_({ ok: true, message: 'pong' });
       return jsonOut_({ ok: false, error: 'unknown action: ' + action });
     } catch (err) {
       return jsonOut_({ ok: false, error: String(err) });
