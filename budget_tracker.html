@@ -464,29 +464,29 @@ function BudgetTracker() {
   }
 
   async function handleEditHistoryLine(hash, newLine) {
-    const prev = history;
-    setHistory(history.map(t => txHash(t) === hash ? { ...t, line: newLine } : t));
+    // Functional setState — critical for bulk updates, where multiple calls fire
+    // back-to-back. The non-functional form would have each call capture the same
+    // pre-update history and last-write-wins, defeating the bulk edit.
+    setHistory(h => h.map(t => txHash(t) === hash ? { ...t, line: newLine } : t));
     try {
       await sheetFetch(config, null, { action: 'update-history', hash, line: newLine });
-      const updated = history.map(t => txHash(t) === hash ? { ...t, line: newLine } : t);
-      cacheSnapshot({ history: updated });
       setSyncStatus({ kind: 'ok', message: 'Updated in history.', when: new Date() });
     } catch (e) {
-      setHistory(prev);
+      // Revert just this row's line if we have a way to know the old value.
+      // Per-row revert without tracking is hard; surface the error and let the
+      // user re-sync from Sheet if it matters.
       setSyncStatus({ kind: 'err', message: 'Edit failed: ' + (e.message || String(e)), when: new Date() });
     }
   }
 
   async function handleDeleteHistoryRow(hash) {
-    const prev = history;
-    const filtered = history.filter(t => txHash(t) !== hash);
-    setHistory(filtered);
+    // Same functional-setState reason as handleEditHistoryLine — bulk deletes
+    // need each call to see the previous call's filter result.
+    setHistory(h => h.filter(t => txHash(t) !== hash));
     try {
       await sheetFetch(config, null, { action: 'delete-history', hash });
-      cacheSnapshot({ history: filtered });
       setSyncStatus({ kind: 'ok', message: 'Removed from history.', when: new Date() });
     } catch (e) {
-      setHistory(prev);
       setSyncStatus({ kind: 'err', message: 'Delete failed: ' + (e.message || String(e)), when: new Date() });
     }
   }
