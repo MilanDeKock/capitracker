@@ -57,6 +57,7 @@ const IconLink      = (p) => <Icon {...p} d={<><path d="M10 13a5 5 0 0 0 7.54.54
 const IconCheck     = (p) => <Icon {...p} d={<><polyline points="20 6 9 17 4 12"/></>}/>;
 const IconEye       = (p) => <Icon {...p} d={<><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></>}/>;
 const IconEyeOff    = (p) => <Icon {...p} d={<><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></>}/>;
+const IconSplit     = (p) => <Icon {...p} d={<><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></>}/>;
 
 /* ============================================================================
    Storage keys & helpers (localStorage)
@@ -144,6 +145,38 @@ const fmtSigned = n => {
 };
 
 /* ============================================================================
+   Splits — a transaction's amount can be allocated across multiple budget lines.
+   Stored on the Sheet's Transactions tab as "Line1:Amount1|Line2:Amount2".
+   Amounts in splits are positive numbers; the row's sign (negative = spend) is
+   implicit. Empty/null splits → row uses its single Line as usual.
+   ========================================================================== */
+function parseSplits(s) {
+  if (s === null || s === undefined) return null;
+  const str = String(s).trim();
+  if (!str) return null;
+  const out = [];
+  for (const part of str.split('|')) {
+    const piece = part.trim();
+    if (!piece) continue;
+    const idx = piece.lastIndexOf(':');
+    if (idx < 0) continue;
+    const line = piece.slice(0, idx).trim();
+    const amt  = Number(piece.slice(idx + 1));
+    if (!line || !Number.isFinite(amt) || amt === 0) continue;
+    out.push({ line, amount: Math.abs(amt) });
+  }
+  return out.length ? out : null;
+}
+function serializeSplits(arr) {
+  if (!arr || !arr.length) return '';
+  return arr.map(s => `${s.line}:${Math.abs(Number(s.amount) || 0)}`).join('|');
+}
+function splitsSum(arr) {
+  if (!arr || !arr.length) return 0;
+  return arr.reduce((s, x) => s + (Math.abs(Number(x.amount)) || 0), 0);
+}
+
+/* ============================================================================
    Row normalization (Sheet/CSV → JS tx shape)
    ========================================================================== */
 function normalizeRow(r) {
@@ -163,6 +196,7 @@ function normalizeRow(r) {
     fee: fe,
     amount: mi + mo + fe,
     line: r['Line'] || null,
+    splits: parseSplits(r['Splits']),
     postedAt: r['Posted At'] || null,
   };
 }
@@ -381,13 +415,22 @@ function BudgetTracker() {
     [allTxs, dateRange],
   );
 
+  // Aggregate spend per budget line. Splits override the row's single Line:
+  // if a row has Splits, distribute its amount across those listed lines instead.
   const actuals = useMemo(() => {
     const a = {};
     for (const b of budget) a[b.line] = 0;
     for (const t of windowTxs) {
       if (t.amount >= 0) continue;
-      if (a[t.line] === undefined) a[t.line] = 0;
-      a[t.line] -= t.amount;
+      if (t.splits && t.splits.length) {
+        for (const s of t.splits) {
+          if (a[s.line] === undefined) a[s.line] = 0;
+          a[s.line] += Math.abs(s.amount);
+        }
+      } else {
+        if (a[t.line] === undefined) a[t.line] = 0;
+        a[t.line] -= t.amount;
+      }
     }
     return a;
   }, [windowTxs, budget]);
@@ -405,8 +448,15 @@ function BudgetTracker() {
       if (t.amount >= 0) continue;
       const cy = cycleKey(t.date, settings.anchorDay);
       if (!result[cy]) result[cy] = {};
-      if (!result[cy][t.line]) result[cy][t.line] = 0;
-      result[cy][t.line] -= t.amount;
+      if (t.splits && t.splits.length) {
+        for (const s of t.splits) {
+          if (!result[cy][s.line]) result[cy][s.line] = 0;
+          result[cy][s.line] += Math.abs(s.amount);
+        }
+      } else {
+        if (!result[cy][t.line]) result[cy][t.line] = 0;
+        result[cy][t.line] -= t.amount;
+      }
     }
     return result;
   }, [allTxs, allCycles, settings.anchorDay]);
@@ -488,6 +538,17 @@ function BudgetTracker() {
       setSyncStatus({ kind: 'ok', message: 'Removed from history.', when: new Date() });
     } catch (e) {
       setSyncStatus({ kind: 'err', message: 'Delete failed: ' + (e.message || String(e)), when: new Date() });
+    }
+  }
+
+  async function handleUpdateSplits(hash, splits) {
+    // splits is an array of {line, amount} or null/empty to clear
+    setHistory(h => h.map(t => txHash(t) === hash ? { ...t, splits: splits && splits.length ? splits : null } : t));
+    try {
+      await sheetFetch(config, null, { action: 'update-splits', hash, splits: serializeSplits(splits) });
+      setSyncStatus({ kind: 'ok', message: splits && splits.length ? 'Splits saved.' : 'Splits cleared.', when: new Date() });
+    } catch (e) {
+      setSyncStatus({ kind: 'err', message: 'Split update failed: ' + (e.message || String(e)), when: new Date() });
     }
   }
 
@@ -594,6 +655,7 @@ function BudgetTracker() {
                                       onPostToHistory={handlePostToHistory}
                                       onEditHistoryLine={handleEditHistoryLine}
                                       onDeleteHistoryRow={handleDeleteHistoryRow}
+                                      onUpdateSplits={handleUpdateSplits}
                                       posting={loading}
                                       newCount={newTxs.length}
                                       newClassifiedCount={newClassified.length}
@@ -748,7 +810,22 @@ function Dashboard({ budget, actuals, settings, dateRange, setDateRange, default
   const watchLine = budgetLineNames.includes(storedWatchLine)
     ? storedWatchLine
     : (budgetLineNames.includes('Bok Fonds') ? 'Bok Fonds' : (budgetLineNames[0] || ''));
-  const watchTx = windowTxs.filter(t => t.line === watchLine && t.amount < 0).sort((a, b) => a.date.localeCompare(b.date));
+  // Build the watched-line spend list. Split rows show only the portion
+  // allocated to the watch line (with a "(split)" suffix in the description
+  // so the running total visibly matches the budget logic).
+  const watchTx = windowTxs.flatMap(t => {
+    if (t.amount >= 0) return [];
+    if (t.splits && t.splits.length) {
+      const match = t.splits.find(s => s.line === watchLine);
+      if (!match) return [];
+      return [{
+        ...t,
+        amount: -Math.abs(match.amount),
+        description: `${t.description} (split)`,
+      }];
+    }
+    return t.line === watchLine ? [t] : [];
+  }).sort((a, b) => a.date.localeCompare(b.date));
   const watchBudget = budget.find(b => b.line === watchLine)?.amount || 0;
   let watchRun = 0;
   const watchWithRun = watchTx.map(t => { watchRun += Math.abs(t.amount); return { ...t, running: watchRun }; });
@@ -918,13 +995,14 @@ function Dashboard({ budget, actuals, settings, dateRange, setDateRange, default
 /* ============================================================================
    Transactions
    ========================================================================== */
-function Transactions({ allTxs, lineNames, overrides, setOverride, clearOverride, anchorDay, onPostToHistory, onEditHistoryLine, onDeleteHistoryRow, posting, newCount, newClassifiedCount, stillNeedingReview }) {
+function Transactions({ allTxs, lineNames, overrides, setOverride, clearOverride, anchorDay, onPostToHistory, onEditHistoryLine, onDeleteHistoryRow, onUpdateSplits, posting, newCount, newClassifiedCount, stillNeedingReview }) {
   const [filterLine, setFL]     = useState('');
   const [filterCycle, setFC]    = useState('');
   const [filterStatus, setFS]   = useState('');
   const [search, setSearch]     = useState('');
   const [selected, setSelected] = useState(() => new Set());
   const [bulkLine, setBulkLine] = useState('');
+  const [splitModalTx, setSplitModalTx] = useState(null);
 
   const cycles = useMemo(() => {
     const s = new Set();
@@ -1088,13 +1166,29 @@ function Transactions({ allTxs, lineNames, overrides, setOverride, clearOverride
                     <td className="px-5 py-1.5">
                       {t.inHistory ? (
                         <div className="flex items-center gap-2">
-                          <select value={t.line} onChange={e => onEditHistoryLine(t.hash, e.target.value)}
-                                  className="px-2 py-1 border border-stone-300 bg-white text-xs font-medium">
-                            {lineNames.includes(t.line) ? null : <option value={t.line}>{t.line}</option>}
-                            {lineNames.map(l => <option key={l} value={l}>{l}</option>)}
-                            <option value="Salary">Salary</option>
-                            <option value="Other Income">Other Income</option>
-                          </select>
+                          {t.splits && t.splits.length ? (
+                            <button onClick={() => setSplitModalTx(t)}
+                                    className="px-2 py-1 border border-indigo-300 bg-indigo-50 text-indigo-800 text-xs font-medium hover:bg-indigo-100 flex items-center gap-1.5 max-w-xs"
+                                    title={t.splits.map(s => `${s.line}: R${Math.abs(s.amount).toLocaleString('en-ZA')}`).join('\n') + '\n\nClick to edit'}>
+                              <IconSplit className="w-3.5 h-3.5 flex-shrink-0" />
+                              <span className="truncate">{t.splits.map(s => `${s.line} R${Math.abs(s.amount).toLocaleString('en-ZA')}`).join(' + ')}</span>
+                            </button>
+                          ) : (
+                            <>
+                              <select value={t.line} onChange={e => onEditHistoryLine(t.hash, e.target.value)}
+                                      className="px-2 py-1 border border-stone-300 bg-white text-xs font-medium">
+                                {lineNames.includes(t.line) ? null : <option value={t.line}>{t.line}</option>}
+                                {lineNames.map(l => <option key={l} value={l}>{l}</option>)}
+                                <option value="Salary">Salary</option>
+                                <option value="Other Income">Other Income</option>
+                              </select>
+                              <button onClick={() => setSplitModalTx(t)}
+                                      className="text-stone-400 hover:text-indigo-700 p-0.5"
+                                      title="Split this transaction across multiple budget lines">
+                                <IconSplit className="w-3.5 h-3.5" />
+                              </button>
+                            </>
+                          )}
                           <span className="inline-block px-1.5 py-0.5 text-[10px] uppercase tracking-wider bg-stone-200 text-stone-600 border border-stone-300">in history</span>
                           <button onClick={() => { if (confirm('Remove this row from history? This deletes it from the Google Sheet.')) onDeleteHistoryRow(t.hash); }}
                                   className="text-stone-400 hover:text-red-700" title="Remove from history">
@@ -1124,6 +1218,109 @@ function Transactions({ allTxs, lineNames, overrides, setOverride, clearOverride
             </tbody>
           </table>
           {filtered.length > 500 && <div className="px-5 py-2 text-xs text-stone-500 bg-stone-50">Showing first 500 of {filtered.length} — narrow filters to see the rest.</div>}
+        </div>
+      </div>
+
+      {splitModalTx && (
+        <SplitModal
+          tx={splitModalTx}
+          lineNames={lineNames}
+          onClose={() => setSplitModalTx(null)}
+          onSave={(splits) => { onUpdateSplits(splitModalTx.hash, splits); setSplitModalTx(null); }}
+        />
+      )}
+    </div>
+  );
+}
+
+/* ============================================================================
+   Split modal — break a single transaction's amount across N budget lines.
+   ========================================================================== */
+function SplitModal({ tx, lineNames, onClose, onSave }) {
+  const totalAbs = Math.abs(tx.amount);
+  const [draft, setDraft] = useState(() => {
+    if (tx.splits && tx.splits.length) {
+      return tx.splits.map(s => ({ line: s.line, amount: String(Math.abs(s.amount)) }));
+    }
+    // Default scaffold: two empty rows, the first preselects the current line.
+    return [
+      { line: tx.line && lineNames.includes(tx.line) ? tx.line : (lineNames[0] || ''), amount: '' },
+      { line: '', amount: '' },
+    ];
+  });
+
+  const updateRow = (i, field, value) => setDraft(draft.map((d, j) => j === i ? { ...d, [field]: value } : d));
+  const addRow    = ()              => setDraft([...draft, { line: lineNames[0] || '', amount: '' }]);
+  const removeRow = (i)             => setDraft(draft.filter((_, j) => j !== i));
+
+  const draftSum  = draft.reduce((s, d) => s + (Math.abs(Number(d.amount)) || 0), 0);
+  const remaining = totalAbs - draftSum;
+  const isBalanced = Math.abs(remaining) < 0.005;
+  const validRows = draft.filter(d => d.line && Number(d.amount) > 0);
+  const canSave   = isBalanced && validRows.length >= 1;
+  const hadSplits = !!(tx.splits && tx.splits.length);
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={onClose}>
+      <div className="bg-white rounded-sm shadow-xl border border-stone-300 max-w-lg w-full" onClick={e => e.stopPropagation()}>
+        <div className="px-5 py-3 border-b border-stone-200 flex items-center justify-between">
+          <h3 className="font-display text-lg">Split transaction</h3>
+          <button onClick={onClose} className="text-stone-400 hover:text-stone-900"><IconX className="w-4 h-4" /></button>
+        </div>
+        <div className="px-5 py-4">
+          <div className="text-xs text-stone-500 uppercase tracking-wider mb-1">{tx.date}</div>
+          <div className="text-sm text-stone-700 mb-1 truncate">{tx.description}</div>
+          <div className="font-num text-2xl mb-4">R{totalAbs.toLocaleString('en-ZA', { maximumFractionDigits: 2 })}</div>
+
+          <div className="space-y-2 mb-3">
+            {draft.map((d, i) => (
+              <div key={i} className="flex items-center gap-2">
+                <select value={d.line} onChange={e => updateRow(i, 'line', e.target.value)}
+                        className="px-2 py-1.5 border border-stone-300 text-sm bg-white flex-1">
+                  <option value="">— pick a line —</option>
+                  {lineNames.map(l => <option key={l} value={l}>{l}</option>)}
+                </select>
+                <input type="number" step="0.01" value={d.amount}
+                       onChange={e => updateRow(i, 'amount', e.target.value)}
+                       placeholder="0.00"
+                       className="px-2 py-1.5 border border-stone-300 text-sm font-num w-28 text-right" />
+                <button onClick={() => removeRow(i)} disabled={draft.length <= 1}
+                        className="text-stone-400 hover:text-red-700 disabled:opacity-30 disabled:cursor-not-allowed" title="Remove this split">
+                  <IconX className="w-4 h-4" />
+                </button>
+              </div>
+            ))}
+          </div>
+
+          <button onClick={addRow}
+                  className="text-xs uppercase tracking-wider text-stone-600 hover:text-stone-900 flex items-center gap-1.5 mb-4">
+            <IconPlus className="w-3.5 h-3.5" /> Add another split
+          </button>
+
+          <div className={`text-sm font-num px-3 py-2 border ${isBalanced ? 'bg-emerald-50 text-emerald-800 border-emerald-200' : 'bg-amber-50 text-amber-800 border-amber-200'}`}>
+            {isBalanced
+              ? <>✓ Balanced — splits total R{draftSum.toLocaleString('en-ZA', { maximumFractionDigits: 2 })}</>
+              : remaining > 0
+                ? <>Still <strong>R{remaining.toLocaleString('en-ZA', { maximumFractionDigits: 2 })}</strong> unallocated</>
+                : <>Over by <strong>R{Math.abs(remaining).toLocaleString('en-ZA', { maximumFractionDigits: 2 })}</strong></>}
+          </div>
+        </div>
+        <div className="px-5 py-3 border-t border-stone-200 flex items-center gap-2 flex-wrap">
+          {hadSplits && (
+            <button onClick={() => { if (confirm('Clear all splits and revert this transaction to its single budget line?')) onSave([]); }}
+                    className="px-3 py-1.5 text-xs uppercase tracking-wider font-medium border border-stone-300 text-stone-600 hover:bg-stone-100">
+              Clear splits
+            </button>
+          )}
+          <button onClick={onClose}
+                  className="ml-auto px-3 py-1.5 text-xs uppercase tracking-wider text-stone-500 hover:text-stone-900">
+            Cancel
+          </button>
+          <button onClick={() => canSave && onSave(validRows.map(d => ({ line: d.line, amount: Math.abs(Number(d.amount)) })))}
+                  disabled={!canSave}
+                  className={`px-4 py-1.5 text-xs uppercase tracking-wider font-medium border ${canSave ? 'border-slate-800 bg-slate-800 text-white hover:bg-slate-700' : 'border-stone-300 text-stone-400 cursor-not-allowed'}`}>
+            Save splits
+          </button>
         </div>
       </div>
     </div>

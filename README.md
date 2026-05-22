@@ -78,6 +78,7 @@ The Apps Script picks new attachments up on Sheet open, or whenever the app call
 ![Classification rules](demo/rules.png)
 
 - **Bulk-edit transactions** — multi-select rows on the Transactions tab and apply a budget line to all of them in one click, or delete a batch from history. For when a single rule mis-tagged twenty rows and you don't want to fix them one at a time.
+- **Split transactions across budget lines** — one bank transaction, multiple budget categories. e.g. a R3,000 savings transfer where R2,000 is real savings and R1,000 is a sinking fund. Splits feed the dashboard's Budget vs Actual and the Running watch as if they were separate transactions.
 - **Dedup on import** — re-imports the same CSV without creating duplicate rows.
 - **Multi-account merge** — all your Capitec accounts (main, credit card, savings, etc.) feed into one ledger, with each row tagged by account.
 - **Private mode** — blur amounts with one click for screen-sharing.
