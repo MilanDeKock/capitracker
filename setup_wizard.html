@@ -52,7 +52,7 @@ const T_SETTINGS = 'Settings';
 
 const HEADERS = {
   [T_RAW]:      ['Nr','Account','Posting Date','Transaction Date','Description','Original Description','Parent Category','Category','Money In','Money Out','Fee','Balance'],
-  [T_HISTORY]:  ['Account','Posting Date','Transaction Date','Description','Original Description','Parent Category','Category','Money In','Money Out','Fee','Line','Posted At'],
+  [T_HISTORY]:  ['Account','Posting Date','Transaction Date','Description','Original Description','Parent Category','Category','Money In','Money Out','Fee','Line','Splits','Posted At'],
   [T_BUDGET]:   ['Line','Amount'],
   [T_RULES]:    ['Line','Type','Value'],
   [T_SETTINGS]: ['Key','Value'],
@@ -93,6 +93,25 @@ function ensureTabs_() {
     else if (tabName === T_RULES)    rows = DEFAULT_RULES;
     else if (tabName === T_SETTINGS) rows = DEFAULT_SETTINGS;
     if (rows && rows.length) sheet.getRange(2, 1, rows.length, rows[0].length).setValues(rows);
+  }
+  migrateSchema_();
+}
+
+// Idempotent — adds any HEADERS columns missing from existing tabs.
+// Lets us evolve the schema without breaking pre-existing sheets.
+function migrateSchema_() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  for (const tabName of Object.keys(HEADERS)) {
+    const sheet = ss.getSheetByName(tabName);
+    if (!sheet) continue;
+    const lastCol = Math.max(sheet.getLastColumn(), 1);
+    const existing = sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(v => String(v).trim());
+    for (const h of HEADERS[tabName]) {
+      if (existing.includes(h)) continue;
+      const newCol = sheet.getLastColumn() + 1;
+      sheet.getRange(1, newCol).setValue(h).setFontWeight('bold');
+      existing.push(h);
+    }
   }
 }
 
@@ -158,6 +177,7 @@ function doPost(e) {
     switch (body.action) {
       case 'append-history':  return jsonOut_(appendHistory_(body.rows || []));
       case 'update-history':  return jsonOut_(updateHistoryLine_(body.hash, body.line));
+      case 'update-splits':   return jsonOut_(updateHistorySplits_(body.hash, body.splits || ''));
       case 'delete-history':  return jsonOut_(deleteHistoryRow_(body.hash));
       case 'save-budget':     return jsonOut_(overwriteTab_(T_BUDGET, body.rows || []));
       case 'save-rules':      return jsonOut_(overwriteTab_(T_RULES, body.rows || []));
@@ -243,6 +263,17 @@ function updateHistoryLine_(hash, line) {
   const lineCol = headers.indexOf('Line');
   if (lineCol < 0) return { ok: false, error: 'no Line column' };
   sheet.getRange(rowIdx, lineCol + 1).setValue(line);
+  return { ok: true };
+}
+
+// Splits is stored as "Line1:Amount1|Line2:Amount2". Empty string clears.
+function updateHistorySplits_(hash, splits) {
+  if (!hash) return { ok: false, error: 'hash required' };
+  const { sheet, rowIdx, headers } = findHistoryRowByHash_(hash);
+  if (rowIdx < 0) return { ok: false, error: 'row not found' };
+  const splitsCol = headers.indexOf('Splits');
+  if (splitsCol < 0) return { ok: false, error: 'no Splits column — reopen the Sheet to migrate' };
+  sheet.getRange(rowIdx, splitsCol + 1).setValue(splits || '');
   return { ok: true };
 }
 
