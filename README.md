@@ -79,7 +79,7 @@ The Apps Script picks new attachments up on Sheet open, or whenever the app call
 
 - **Bulk-edit transactions** — multi-select rows on the Transactions tab and apply a budget line to all of them in one click, or delete a batch from history. For when a single rule mis-tagged twenty rows and you don't want to fix them one at a time.
 - **Dedup on import** — re-imports the same CSV without creating duplicate rows.
-- **Two-account merge** — main account + credit card both feed into one ledger.
+- **Multi-account merge** — all your Capitec accounts (main, credit card, savings, etc.) feed into one ledger, with each row tagged by account.
 - **Private mode** — blur amounts with one click for screen-sharing.
 - **No build step** — single HTML file, React via Babel-standalone, Tailwind via CDN.
 
