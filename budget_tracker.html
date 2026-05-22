@@ -63,12 +63,13 @@ const IconSplit     = (p) => <Icon {...p} d={<><polyline points="16 3 21 3 21 8"
    Storage keys & helpers (localStorage)
    ========================================================================== */
 const K = {
-  config:     'bt.config',     // {sheetUrl, sheetToken}
-  cache:      'bt.cache',      // last loaded snapshot — offline fallback only
-  overrides:  'bt.overrides',  // hash → line, for rows not yet posted to history
-  tab:        'bt.tab',        // last selected tab
-  privateMode:'bt.privateMode',// blur sensitive amounts (eye toggle)
-  watchLine:  'bt.watchLine',  // which budget line the Running Watch panel is showing
+  config:         'bt.config',         // {sheetUrl, sheetToken}
+  cache:          'bt.cache',          // last loaded snapshot — offline fallback only
+  overrides:      'bt.overrides',      // hash → line, for rows not yet posted to history
+  splitOverrides: 'bt.splitOverrides', // hash → splits[], for rows not yet posted to history
+  tab:            'bt.tab',            // last selected tab
+  privateMode:    'bt.privateMode',    // blur sensitive amounts (eye toggle)
+  watchLine:      'bt.watchLine',      // which budget line the Running Watch panel is showing
 };
 const loadLS = (k, fallback) => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fallback; } catch { return fallback; } };
 const saveLS = (k, v)        => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
@@ -213,6 +214,7 @@ function denormalizeRow(t) {
     'Money Out': t.moneyOut,
     'Fee': t.fee,
     'Line': t.line,
+    'Splits': serializeSplits(t.splits),
   };
 }
 const txHash = t => `${t.date}|${(t.originalDesc || t.description || '').toLowerCase()}|${(t.amount || 0).toFixed(2)}`;
@@ -280,6 +282,7 @@ function BudgetTracker() {
   const [rawStatements, setRawStatements] = useState(cached.rawStatements  || []);
   const [history, setHistory]             = useState(cached.history        || []);
   const [overrides, setOverrides]         = useState(() => loadLS(K.overrides, {}));
+  const [splitOverrides, setSplitOverrides] = useState(() => loadLS(K.splitOverrides, {}));
   const [csvRows, setCsvRows]             = useState([]);
   const [fileNames, setFileNames]         = useState([]);
   const [tab, setTab]                     = useState(() => {
@@ -295,6 +298,7 @@ function BudgetTracker() {
 
   useEffect(() => saveLS(K.config, config),       [config]);
   useEffect(() => saveLS(K.overrides, overrides), [overrides]);
+  useEffect(() => saveLS(K.splitOverrides, splitOverrides), [splitOverrides]);
   useEffect(() => saveLS(K.tab, tab),             [tab]);
   useEffect(() => saveLS(K.privateMode, privateMode), [privateMode]);
 
@@ -391,11 +395,12 @@ function BudgetTracker() {
       seen.add(h);
       const auto = classify(t, rules);
       const line = overrides[h] || auto;
-      out.push({ ...t, inHistory: false, hash: h, line });
+      const splits = splitOverrides[h] || null;
+      out.push({ ...t, inHistory: false, hash: h, line, splits });
     }
     out.sort((a, b) => b.date.localeCompare(a.date));
     return out;
-  }, [history, rawStatements, csvRows, rules, overrides]);
+  }, [history, rawStatements, csvRows, rules, overrides, splitOverrides]);
 
   // Default date range — current cycle
   const defaultRange = useMemo(() => {
@@ -485,8 +490,10 @@ function BudgetTracker() {
       setHistory(nextHistory);
       cacheSnapshot({ history: nextHistory });
       const newOv = { ...overrides };
-      for (const t of newClassified) delete newOv[t.hash];
+      const newSplitOv = { ...splitOverrides };
+      for (const t of newClassified) { delete newOv[t.hash]; delete newSplitOv[t.hash]; }
       setOverrides(newOv);
+      setSplitOverrides(newSplitOv);
       setSyncStatus({ kind: 'ok', message: `Posted ${res.appended} row(s) to history.`, when: new Date() });
     } catch (e) {
       setSyncStatus({ kind: 'err', message: e.message || String(e), when: new Date() });
@@ -542,13 +549,28 @@ function BudgetTracker() {
   }
 
   async function handleUpdateSplits(hash, splits) {
-    // splits is an array of {line, amount} or null/empty to clear
-    setHistory(h => h.map(t => txHash(t) === hash ? { ...t, splits: splits && splits.length ? splits : null } : t));
-    try {
-      await sheetFetch(config, null, { action: 'update-splits', hash, splits: serializeSplits(splits) });
-      setSyncStatus({ kind: 'ok', message: splits && splits.length ? 'Splits saved.' : 'Splits cleared.', when: new Date() });
-    } catch (e) {
-      setSyncStatus({ kind: 'err', message: 'Split update failed: ' + (e.message || String(e)), when: new Date() });
+    // splits is an array of {line, amount} or null/empty to clear.
+    // In-history rows write straight to the Sheet. New (unposted) rows live
+    // in local splitOverrides state and get serialised into Splits column
+    // when the user clicks Post to history.
+    const isInHistory = history.some(t => txHash(t) === hash);
+    const cleaned = splits && splits.length ? splits : null;
+    if (isInHistory) {
+      setHistory(h => h.map(t => txHash(t) === hash ? { ...t, splits: cleaned } : t));
+      try {
+        await sheetFetch(config, null, { action: 'update-splits', hash, splits: serializeSplits(splits) });
+        setSyncStatus({ kind: 'ok', message: cleaned ? 'Splits saved.' : 'Splits cleared.', when: new Date() });
+      } catch (e) {
+        setSyncStatus({ kind: 'err', message: 'Split update failed: ' + (e.message || String(e)), when: new Date() });
+      }
+    } else {
+      // Local-only — staged until the row is posted to history.
+      setSplitOverrides(o => {
+        const n = { ...o };
+        if (cleaned) n[hash] = cleaned;
+        else         delete n[hash];
+        return n;
+      });
     }
   }
 
@@ -1197,17 +1219,33 @@ function Transactions({ allTxs, lineNames, overrides, setOverride, clearOverride
                         </div>
                       ) : (
                         <div className="flex items-center gap-2">
-                          <select value={t.line} onChange={e => setOverride(t.hash, e.target.value)}
-                                  className={`px-2 py-1 border text-xs font-medium ${
-                                    t.line === 'Review' ? 'border-red-400 bg-red-50'
-                                    : overridden ? 'border-amber-400 bg-amber-50'
-                                    : 'border-stone-300 bg-white'
-                                  }`}>
-                            {lineNames.includes(t.line) ? null : <option value={t.line}>{t.line}</option>}
-                            {lineNames.map(l => <option key={l} value={l}>{l}</option>)}
-                            <option value="Salary">Salary</option>
-                            <option value="Other Income">Other Income</option>
-                          </select>
+                          {t.splits && t.splits.length ? (
+                            <button onClick={() => setSplitModalTx(t)}
+                                    className="px-2 py-1 border border-indigo-300 bg-indigo-50 text-indigo-800 text-xs font-medium hover:bg-indigo-100 flex items-center gap-1.5 max-w-xs"
+                                    title={t.splits.map(s => `${s.line}: R${Math.abs(s.amount).toLocaleString('en-ZA')}`).join('\n') + '\n\nStaged — saves to Sheet on Post to history.\nClick to edit.'}>
+                              <IconSplit className="w-3.5 h-3.5 flex-shrink-0" />
+                              <span className="truncate">{t.splits.map(s => `${s.line} R${Math.abs(s.amount).toLocaleString('en-ZA')}`).join(' + ')}</span>
+                            </button>
+                          ) : (
+                            <>
+                              <select value={t.line} onChange={e => setOverride(t.hash, e.target.value)}
+                                      className={`px-2 py-1 border text-xs font-medium ${
+                                        t.line === 'Review' ? 'border-red-400 bg-red-50'
+                                        : overridden ? 'border-amber-400 bg-amber-50'
+                                        : 'border-stone-300 bg-white'
+                                      }`}>
+                                {lineNames.includes(t.line) ? null : <option value={t.line}>{t.line}</option>}
+                                {lineNames.map(l => <option key={l} value={l}>{l}</option>)}
+                                <option value="Salary">Salary</option>
+                                <option value="Other Income">Other Income</option>
+                              </select>
+                              <button onClick={() => setSplitModalTx(t)}
+                                      className="text-stone-400 hover:text-indigo-700 p-0.5"
+                                      title="Split this transaction across multiple budget lines">
+                                <IconSplit className="w-3.5 h-3.5" />
+                              </button>
+                            </>
+                          )}
                           {overridden && <button onClick={() => clearOverride(t.hash)} title="Clear override" className="text-amber-700 hover:text-amber-900"><IconX className="w-3.5 h-3.5" /></button>}
                         </div>
                       )}
