@@ -77,6 +77,7 @@ The Apps Script picks new attachments up on Sheet open, or whenever the app call
 
 ![Classification rules](demo/rules.png)
 
+- **Bulk-edit transactions** — multi-select rows on the Transactions tab and apply a budget line to all of them in one click, or delete a batch from history. For when a single rule mis-tagged twenty rows and you don't want to fix them one at a time.
 - **Dedup on import** — re-imports the same CSV without creating duplicate rows.
 - **Two-account merge** — main account + credit card both feed into one ledger.
 - **Private mode** — blur amounts with one click for screen-sharing.
