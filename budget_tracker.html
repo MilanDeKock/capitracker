@@ -468,7 +468,10 @@ function BudgetTracker() {
 
   const lineNames           = budget.map(b => b.line);
   const newTxs              = allTxs.filter(t => !t.inHistory);
-  const newClassified       = newTxs.filter(t => t.line !== 'Review');
+  // A row counts as classified if either its Line is set (not "Review") OR it
+  // has splits configured — splits override the single line for budgeting,
+  // so a Review row with splits is effectively classified across those lines.
+  const newClassified       = newTxs.filter(t => t.line !== 'Review' || (t.splits && t.splits.length));
   const stillNeedingReview  = newTxs.length - newClassified.length;
 
   async function handlePostToHistory() {
