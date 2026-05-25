@@ -584,6 +584,33 @@
     return key;
   }
 
+  // Shared retry wrapper for transient Gemini failures (503 = overload,
+  // 429 = rate-limit, 500 = generic blip). Tries up to 3 times total with
+  // 1s then 2s backoff. Re-throws if still failing or if the error is
+  // not retryable (e.g. 400/401/403 — those are our problem, not theirs).
+  function geminiFetch_(url, payload) {
+    let lastErr = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt > 0) Utilities.sleep(1000 * attempt);
+      const res = UrlFetchApp.fetch(url, {
+        method: 'post',
+        contentType: 'application/json',
+        payload: payload,
+        muteHttpExceptions: true,
+      });
+      const code = res.getResponseCode();
+      if (code === 200) return res;
+      const isRetryable = (code === 503 || code === 429 || code === 500 || code === 502 || code === 504);
+      lastErr = 'Gemini API ' + code + ': ' + res.getContentText().slice(0, 400);
+      if (!isRetryable) throw new Error(lastErr);
+    }
+    // All retries exhausted
+    if (lastErr && lastErr.indexOf('503') >= 0) {
+      throw new Error('Gemini is overloaded right now (still retrying tried 3 times). Please try again in a minute.');
+    }
+    throw new Error(lastErr || 'Gemini unreachable');
+  }
+
   // Conversational budget assistant. Takes the user's message history plus
   // a snapshot of their current budget/settings/transactions, returns the
   // AI's reply. Same GEMINI_API_KEY as PDF parsing.
@@ -612,16 +639,7 @@
     };
 
     const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + GEMINI_MODEL + ':generateContent?key=' + apiKey;
-    const res = UrlFetchApp.fetch(url, {
-      method: 'post',
-      contentType: 'application/json',
-      payload: JSON.stringify(body),
-      muteHttpExceptions: true,
-    });
-    const code = res.getResponseCode();
-    if (code !== 200) {
-      throw new Error('Gemini chat error ' + code + ': ' + res.getContentText().slice(0, 500));
-    }
+    const res = geminiFetch_(url, JSON.stringify(body));
     const data = JSON.parse(res.getContentText());
     const cand = data.candidates && data.candidates[0];
     const text = cand && cand.content && cand.content.parts && cand.content.parts.map(p => p.text || '').join('') || '';
@@ -677,17 +695,7 @@
     };
 
     const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + GEMINI_MODEL + ':generateContent?key=' + apiKey;
-    const res = UrlFetchApp.fetch(url, {
-      method: 'post',
-      contentType: 'application/json',
-      payload: JSON.stringify(body),
-      muteHttpExceptions: true,
-    });
-
-    const code = res.getResponseCode();
-    if (code !== 200) {
-      throw new Error('Gemini API error ' + code + ': ' + res.getContentText().slice(0, 500));
-    }
+    const res = geminiFetch_(url, JSON.stringify(body));
     const data = JSON.parse(res.getContentText());
     const cand = data.candidates && data.candidates[0];
     const text = cand && cand.content && cand.content.parts && cand.content.parts[0] && cand.content.parts[0].text;
