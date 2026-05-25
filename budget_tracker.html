@@ -316,6 +316,7 @@ function BudgetTracker() {
   const [chatOpen, setChatOpen]           = useState(false);
   const [chatMessages, setChatMessages]   = useState([]);
   const [chatSending, setChatSending]     = useState(false);
+  const [chatScope, setChatScope]         = useState('window'); // 'window' | 'last30' | 'last90' | 'all'
 
   useEffect(() => saveLS(K.config, config),       [config]);
   useEffect(() => saveLS(K.overrides, overrides), [overrides]);
@@ -609,26 +610,58 @@ function BudgetTracker() {
     setChatMessages(nextMessages);
     setChatSending(true);
     try {
-      // Default scope: the cycle window the user is currently viewing on the
-      // Dashboard. The AI is told this is the focus and will say "I only have
-      // current-cycle data" if asked about other periods (we don't ship the
-      // whole history every turn — that'd blow token budgets and slow things
-      // down).
+      // Pick which transactions to send based on the scope dropdown. The
+      // default ('window') sends what the Dashboard is showing — fast and
+      // matches what the user is looking at. Other scopes let them ask
+      // questions across more history without leaving the chat.
       const mapTx = t => ({
         date: t.date,
         description: t.description,
         amount: Math.round(t.amount * 100) / 100,
         line: t.line,
       });
-      const txs = windowTxs.slice(0, 300).map(mapTx);
+      const today = new Date();
+      const cutoffISO = (days) => {
+        const d = new Date(today); d.setDate(today.getDate() - days);
+        return toISO(d);
+      };
+
+      let scopeTxs, scopeFrom, scopeTo, scopeLabel;
+      if (chatScope === 'last30') {
+        scopeFrom = cutoffISO(30); scopeTo = toISO(today);
+        scopeTxs = allTxs.filter(t => effectiveDate(t) >= scopeFrom);
+        scopeLabel = 'last 30 days';
+      } else if (chatScope === 'last90') {
+        scopeFrom = cutoffISO(90); scopeTo = toISO(today);
+        scopeTxs = allTxs.filter(t => effectiveDate(t) >= scopeFrom);
+        scopeLabel = 'last 90 days';
+      } else if (chatScope === 'all') {
+        scopeFrom = ''; scopeTo = '';
+        scopeTxs = allTxs;
+        scopeLabel = 'all available history';
+      } else {
+        // default: 'window'
+        scopeFrom = dateRange.from; scopeTo = dateRange.to;
+        scopeTxs = windowTxs;
+        scopeLabel = 'current cycle window';
+      }
+
+      // Hard cap so we don't blow the context window on big histories.
+      const MAX_TX_IN_PROMPT = 600;
+      const txs = scopeTxs.slice(0, MAX_TX_IN_PROMPT).map(mapTx);
+      const truncated = scopeTxs.length > MAX_TX_IN_PROMPT;
+
       const res = await sheetFetch(config, null, {
         action: 'chat',
         messages: nextMessages.map(m => ({ role: m.role, text: m.text })),
         context: {
           budget,
           settings: { netIncome: settings.netIncome, anchorDay: settings.anchorDay },
-          windowFrom: dateRange.from,
-          windowTo: dateRange.to,
+          windowFrom: scopeFrom,
+          windowTo: scopeTo,
+          scopeLabel,
+          truncated,
+          totalCount: scopeTxs.length,
           transactions: txs,
         },
       });
@@ -841,6 +874,8 @@ function BudgetTracker() {
         <ChatBot
           messages={chatMessages}
           sending={chatSending}
+          scope={chatScope}
+          setScope={setChatScope}
           onSend={handleChatSend}
           onClose={() => setChatOpen(false)}
           onClear={() => setChatMessages([])}
@@ -855,7 +890,7 @@ function BudgetTracker() {
    Requires GEMINI_API_KEY set as a Script Property; if not set, the first
    send will surface a clear error.
    ========================================================================== */
-function ChatBot({ messages, sending, onSend, onClose, onClear }) {
+function ChatBot({ messages, sending, scope, setScope, onSend, onClose, onClear }) {
   const [input, setInput] = useState('');
   const listRef = React.useRef(null);
 
@@ -870,6 +905,13 @@ function ChatBot({ messages, sending, onSend, onClose, onClear }) {
     setInput('');
   };
 
+  const scopeLabels = {
+    'window':  'This cycle',
+    'last30':  'Last 30 days',
+    'last90':  'Last 90 days',
+    'all':     'All history',
+  };
+
   const suggested = [
     "How much have I spent on Eating Out this cycle?",
     "What's my biggest expense this cycle?",
@@ -880,16 +922,27 @@ function ChatBot({ messages, sending, onSend, onClose, onClear }) {
   return (
     <div className="fixed bottom-20 right-5 w-96 max-w-[calc(100vw-2.5rem)] bg-white border border-stone-300 rounded-sm shadow-xl z-40 flex flex-col"
          style={{ maxHeight: 'calc(100vh - 7rem)' }}>
-      <div className="px-4 py-2.5 border-b border-stone-200 flex items-center justify-between bg-slate-800 text-stone-100">
-        <div>
-          <div className="font-display text-sm">🪙 CapiTracker AI</div>
-          <div className="text-[10px] text-stone-400">Asks Gemini using your transactions as context</div>
+      <div className="px-4 py-2.5 border-b border-stone-200 bg-slate-800 text-stone-100">
+        <div className="flex items-center justify-between mb-1.5">
+          <div>
+            <div className="font-display text-sm">🪙 CapiTracker AI</div>
+            <div className="text-[10px] text-stone-400">Asks Gemini using your transactions as context</div>
+          </div>
+          <div className="flex items-center gap-2">
+            {messages.length > 0 && (
+              <button onClick={onClear} className="text-[10px] uppercase tracking-wider text-stone-400 hover:text-stone-100">Clear</button>
+            )}
+            <button onClick={onClose} className="text-stone-400 hover:text-stone-100 text-xl leading-none px-1">×</button>
+          </div>
         </div>
         <div className="flex items-center gap-2">
-          {messages.length > 0 && (
-            <button onClick={onClear} className="text-[10px] uppercase tracking-wider text-stone-400 hover:text-stone-100">Clear</button>
-          )}
-          <button onClick={onClose} className="text-stone-400 hover:text-stone-100 text-xl leading-none px-1">×</button>
+          <span className="text-[10px] uppercase tracking-wider text-stone-400">Scope:</span>
+          <select value={scope} onChange={e => setScope(e.target.value)}
+                  className="text-xs bg-slate-700 border border-slate-600 text-stone-100 px-2 py-0.5">
+            {Object.entries(scopeLabels).map(([v, label]) => (
+              <option key={v} value={v}>{label}</option>
+            ))}
+          </select>
         </div>
       </div>
 

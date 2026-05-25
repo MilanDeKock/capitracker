@@ -662,10 +662,10 @@
     lines.push("You are CapiTracker's friendly budget assistant. The user banks in South Africa and is asking questions about their personal budget.");
     lines.push("");
     lines.push("SCOPE RULES (important):");
-    lines.push("- Default to the CURRENT WINDOW (the cycle the user is viewing). Treat 'this cycle', 'now', 'so far', 'this month' as referring to it.");
-    lines.push("- Only the current window's transactions are provided in this prompt. You do NOT have transactions from other cycles.");
-    lines.push("- If the user explicitly asks about another cycle, last month, the year, etc., say plainly: 'I only have data for the current cycle (<dates>). Switch the date window in the dashboard and ask me again, and I'll have that data.'");
-    lines.push("- Never invent numbers for other periods. Always work from the data below.");
+    lines.push("- The user picks a SCOPE for the chat (e.g. 'This cycle', 'Last 30 days', 'Last 90 days', 'All history'). Only transactions in that scope are provided in this prompt.");
+    lines.push("- Treat 'now', 'so far', 'this month' as referring to the current scope.");
+    lines.push("- If the user explicitly asks about a period outside the current scope, say plainly: 'My current scope is <scope> (<dates>). Change the chat scope dropdown at the top of the chat and ask me again, and I'll have that data.'");
+    lines.push("- Never invent numbers for periods outside the scope. Always work from the data below.");
     lines.push("");
     lines.push("STYLE:");
     lines.push("- Be concise. Use ZAR formatting (R1 234,56 with en-ZA locale).");
@@ -682,18 +682,22 @@
       lines.push('SETTINGS: net income R' + (ctx.settings.netIncome || 0) + '/cycle, pay-cycle anchor day ' + (ctx.settings.anchorDay || 25) + '.');
       lines.push('');
     }
+    const scopeName = ctx.scopeLabel || 'current cycle';
     if (ctx.windowFrom && ctx.windowTo) {
-      lines.push('CURRENT WINDOW: ' + ctx.windowFrom + ' to ' + ctx.windowTo + ' (focus all answers on this period unless explicitly asked otherwise).');
-      lines.push('');
+      lines.push('SCOPE: ' + scopeName + ' — ' + ctx.windowFrom + ' to ' + ctx.windowTo + '.');
+    } else {
+      lines.push('SCOPE: ' + scopeName + ' (all available history).');
     }
+    lines.push('');
     if (ctx.transactions && ctx.transactions.length) {
-      lines.push('TRANSACTIONS IN CURRENT WINDOW (' + ctx.transactions.length + ' rows, csv-like — date | description | amount | budget line):');
+      const hdr = 'TRANSACTIONS IN SCOPE (' + ctx.transactions.length + (ctx.truncated ? ' shown, ' + ctx.totalCount + ' total — truncated for prompt size' : '') + ', csv-like — date | description | amount | budget line):';
+      lines.push(hdr);
       for (const t of ctx.transactions) {
         lines.push(t.date + ' | ' + (t.description || '') + ' | ' + (t.amount || 0) + ' | ' + (t.line || ''));
       }
       lines.push('');
     } else {
-      lines.push('TRANSACTIONS IN CURRENT WINDOW: none provided.');
+      lines.push('TRANSACTIONS IN SCOPE: none provided.');
       lines.push('');
     }
     return lines.join('\n');
