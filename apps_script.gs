@@ -339,6 +339,8 @@
           return jsonOut_(overwriteTab_(T_RULES, body.rows || []));
         case 'save-settings':
           return jsonOut_(overwriteSettings_(body.settings || {}));
+        case 'chat':
+          return jsonOut_(chatWithGemini_(body.messages || [], body.context || {}));
         default:
           return jsonOut_({ ok: false, error: 'unknown action: ' + body.action });
       }
@@ -580,6 +582,80 @@
     const key = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
     if (!key) throw new Error('No GEMINI_API_KEY in Script Properties. See the comment above this function for setup.');
     return key;
+  }
+
+  // Conversational budget assistant. Takes the user's message history plus
+  // a snapshot of their current budget/settings/transactions, returns the
+  // AI's reply. Same GEMINI_API_KEY as PDF parsing.
+  function chatWithGemini_(messages, context) {
+    const apiKey = getGeminiKey_();
+    if (!messages.length) return { ok: false, error: 'no messages' };
+
+    const systemPrompt = buildChatSystemPrompt_(context);
+
+    // Gemini wants the conversation as contents[] with alternating user/model
+    // roles. Inject the system context as a prelude to the first user turn.
+    const contents = [];
+    for (let i = 0; i < messages.length; i++) {
+      const m = messages[i];
+      const role = m.role === 'assistant' ? 'model' : 'user';
+      const text = (i === 0 && role === 'user') ? (systemPrompt + '\n\n' + m.text) : m.text;
+      contents.push({ role, parts: [{ text }] });
+    }
+
+    const body = {
+      contents,
+      generationConfig: {
+        temperature: 0.3,
+        maxOutputTokens: 1500,
+      },
+    };
+
+    const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + GEMINI_MODEL + ':generateContent?key=' + apiKey;
+    const res = UrlFetchApp.fetch(url, {
+      method: 'post',
+      contentType: 'application/json',
+      payload: JSON.stringify(body),
+      muteHttpExceptions: true,
+    });
+    const code = res.getResponseCode();
+    if (code !== 200) {
+      throw new Error('Gemini chat error ' + code + ': ' + res.getContentText().slice(0, 500));
+    }
+    const data = JSON.parse(res.getContentText());
+    const cand = data.candidates && data.candidates[0];
+    const text = cand && cand.content && cand.content.parts && cand.content.parts.map(p => p.text || '').join('') || '';
+    return { ok: true, message: text };
+  }
+
+  function buildChatSystemPrompt_(ctx) {
+    const lines = [];
+    lines.push("You are CapiTracker's friendly budget assistant. The user banks in South Africa and is asking questions about their personal budget.");
+    lines.push("");
+    lines.push("Be concise. Use ZAR formatting (R1 234,56 with en-ZA locale). Answer specifically with numbers when you can. Say 'I don't have that info' rather than guessing.");
+    lines.push("");
+
+    if (ctx.budget && ctx.budget.length) {
+      lines.push('BUDGET (per pay cycle):');
+      for (const b of ctx.budget) lines.push('- ' + b.line + ': R' + b.amount);
+      lines.push('');
+    }
+    if (ctx.settings) {
+      lines.push('SETTINGS: net income R' + (ctx.settings.netIncome || 0) + '/cycle, pay-cycle anchor day ' + (ctx.settings.anchorDay || 25) + '.');
+      lines.push('');
+    }
+    if (ctx.windowFrom && ctx.windowTo) {
+      lines.push('CURRENT WINDOW: ' + ctx.windowFrom + ' to ' + ctx.windowTo + ' (this is the cycle the user is currently viewing).');
+      lines.push('');
+    }
+    if (ctx.transactions && ctx.transactions.length) {
+      lines.push('TRANSACTIONS IN CURRENT WINDOW (' + ctx.transactions.length + ' rows, csv-like — date | description | amount | budget line):');
+      for (const t of ctx.transactions) {
+        lines.push(t.date + ' | ' + (t.description || '') + ' | ' + (t.amount || 0) + ' | ' + (t.line || ''));
+      }
+      lines.push('');
+    }
+    return lines.join('\n');
   }
 
   function parseStatementPdf_(pdfBlob) {
