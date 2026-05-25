@@ -634,7 +634,10 @@
       contents,
       generationConfig: {
         temperature: 0.3,
-        maxOutputTokens: 1500,
+        // Gemini 2.5 Flash supports up to ~8K output tokens. 4000 covers any
+        // reasonable answer without burning quota. Was 1500 — too tight; long
+        // answers were getting chopped mid-sentence.
+        maxOutputTokens: 4000,
       },
     };
 
@@ -642,7 +645,15 @@
     const res = geminiFetch_(url, JSON.stringify(body));
     const data = JSON.parse(res.getContentText());
     const cand = data.candidates && data.candidates[0];
-    const text = cand && cand.content && cand.content.parts && cand.content.parts.map(p => p.text || '').join('') || '';
+    let text = cand && cand.content && cand.content.parts && cand.content.parts.map(p => p.text || '').join('') || '';
+    const finish = cand && cand.finishReason;
+    // Append a clear marker if the model stopped because it hit the token cap
+    // or was blocked, rather than silently returning a half-formed answer.
+    if (finish === 'MAX_TOKENS') {
+      text += '\n\n— answer truncated at the token limit. Ask a more specific question, or "continue" to get the rest.';
+    } else if (finish === 'SAFETY' || finish === 'RECITATION' || finish === 'BLOCKLIST') {
+      text += '\n\n— Gemini stopped because of a content filter (finishReason: ' + finish + '). Try rephrasing.';
+    }
     return { ok: true, message: text };
   }
 
