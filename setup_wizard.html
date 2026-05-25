@@ -159,6 +159,7 @@ function pullStatements_() {
 function doGet(e) {
   const p = (e && e.parameter) || {};
   if (!checkToken_(p.token)) return jsonOut_({ ok: false, error: 'bad token' });
+  try { migrateSchema_(); } catch (_) {}
   const action = p.action || 'load';
   try {
     if (action === 'load') return jsonOut_(loadAll_());
@@ -173,6 +174,7 @@ function doPost(e) {
   try { body = JSON.parse(e && e.postData && e.postData.contents); } catch (_) { return jsonOut_({ ok: false, error: 'bad json' }); }
   if (!body) return jsonOut_({ ok: false, error: 'no body' });
   if (!checkToken_(body.token)) return jsonOut_({ ok: false, error: 'bad token' });
+  try { migrateSchema_(); } catch (_) {}
   try {
     switch (body.action) {
       case 'append-history':  return jsonOut_(appendHistory_(body.rows || []));

@@ -216,6 +216,10 @@
     if (!checkToken_(params.token)) {
       return jsonOut_({ ok: false, error: 'bad token' });
     }
+    // Auto-migrate schema on every authenticated request — idempotent and cheap.
+    // Means new columns (e.g. Splits, Budget Date) appear without users having
+    // to physically reopen the Sheet to trigger onOpen.
+    try { migrateSchema_(); } catch (_) {}
     const action = params.action || 'load';
     try {
       if (action === 'load') return jsonOut_(loadAll_());
@@ -236,6 +240,7 @@
     if (!checkToken_(body.token)) {
       return jsonOut_({ ok: false, error: 'bad token' });
     }
+    try { migrateSchema_(); } catch (_) {}
 
     try {
       switch (body.action) {
