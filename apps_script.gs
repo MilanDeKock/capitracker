@@ -146,7 +146,11 @@
   }
 
   // ============================================================================
-  // EMAIL PULL — gathers EVERY account_statement_*.csv attachment (both accounts)
+  // EMAIL PULL — gathers statement attachments from Gmail and writes T_RAW.
+  // Handles both:
+  //   - CSV: account_statement_*.csv (user-forwarded from Capitec app)
+  //   - PDF: account_statement.pdf etc. (sent directly by Capitec, parsed
+  //          by Gemini if GEMINI_API_KEY is set in Script Properties)
   // ============================================================================
   function pullStatements_() {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -156,39 +160,84 @@
     const threads = GmailApp.search(GMAIL_QUERY, 0, 30);
     const collected = [];
     const seenHashes = new Set();
+    let csvCount = 0, pdfCount = 0, pdfTxCount = 0;
+    const aiEnabled = !!PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
 
     for (const thread of threads) {
       for (const msg of thread.getMessages()) {
         for (const att of msg.getAttachments()) {
           const name = (att.getName() || '').toLowerCase();
-          if (!name.startsWith('account_statement') || !name.endsWith('.csv')) continue;
           if (att.isGoogleType && att.isGoogleType()) continue;
 
-          let csv;
-          try { csv = Utilities.parseCsv(att.getDataAsString()); }
-          catch (e) { Logger.log('parse failed for ' + name + ': ' + e); continue; }
-          if (csv.length < 2) continue;
+          // ---- CSV path (existing) ----
+          if (name.startsWith('account_statement') && name.endsWith('.csv')) {
+            csvCount++;
+            let csv;
+            try { csv = Utilities.parseCsv(att.getDataAsString()); }
+            catch (e) { Logger.log('CSV parse failed for ' + name + ': ' + e); continue; }
+            if (csv.length < 2) continue;
 
-          const idx = {};
-          csv[0].forEach((h, i) => { idx[String(h).trim()] = i; });
+            const idx = {};
+            csv[0].forEach((h, i) => { idx[String(h).trim()] = i; });
 
-          for (let r = 1; r < csv.length; r++) {
-            const row = csv[r];
-            const postingDate = row[idx['Posting Date']];
-            if (!postingDate) continue;
-            const out = HEADERS[T_RAW].map(h => {
-              if (h === 'Nr') return '';
-              if (idx[h] === undefined) return '';
-              return row[idx[h]];
-            });
-            const desc = (row[idx['Original Description']] || row[idx['Description']] || '').toString().toLowerCase();
-            const mi = Number(row[idx['Money In']]) || 0;
-            const mo = Number(row[idx['Money Out']]) || 0;
-            const fe = Number(row[idx['Fee']]) || 0;
-            const hash = postingDate + '|' + desc + '|' + (mi + mo + fe).toFixed(2);
-            if (seenHashes.has(hash)) continue;
-            seenHashes.add(hash);
-            collected.push(out);
+            for (let r = 1; r < csv.length; r++) {
+              const row = csv[r];
+              const postingDate = row[idx['Posting Date']];
+              if (!postingDate) continue;
+              const out = HEADERS[T_RAW].map(h => {
+                if (h === 'Nr') return '';
+                if (idx[h] === undefined) return '';
+                return row[idx[h]];
+              });
+              const desc = (row[idx['Original Description']] || row[idx['Description']] || '').toString().toLowerCase();
+              const mi = Number(row[idx['Money In']]) || 0;
+              const mo = Number(row[idx['Money Out']]) || 0;
+              const fe = Number(row[idx['Fee']]) || 0;
+              const hash = postingDate + '|' + desc + '|' + (mi + mo + fe).toFixed(2);
+              if (seenHashes.has(hash)) continue;
+              seenHashes.add(hash);
+              collected.push(out);
+            }
+            continue;
+          }
+
+          // ---- PDF path (AI-parsed) ----
+          if (name.endsWith('.pdf') && aiEnabled && isBankStatementPdf_(att, msg)) {
+            pdfCount++;
+            Logger.log('Parsing PDF: ' + att.getName() + ' (' + Math.round(att.getSize() / 1024) + 'KB)');
+            try {
+              const txs = parseStatementPdf_(att);
+              for (const tx of txs) {
+                if (!tx.postingDate) continue;
+                const mi = Number(tx.moneyIn) || 0;
+                const mo = Number(tx.moneyOut) || 0;
+                const fe = Number(tx.fee) || 0;
+                const desc = (tx.originalDescription || tx.description || '').toString().toLowerCase();
+                const hash = tx.postingDate + '|' + desc + '|' + (mi + mo + fe).toFixed(2);
+                if (seenHashes.has(hash)) continue;
+                seenHashes.add(hash);
+                const out = HEADERS[T_RAW].map(h => {
+                  if (h === 'Nr')                  return '';
+                  if (h === 'Account')             return '';
+                  if (h === 'Posting Date')        return tx.postingDate || '';
+                  if (h === 'Transaction Date')    return tx.transactionDate || tx.postingDate || '';
+                  if (h === 'Description')         return tx.description || '';
+                  if (h === 'Original Description')return tx.originalDescription || tx.description || '';
+                  if (h === 'Parent Category')     return '';
+                  if (h === 'Category')            return '';
+                  if (h === 'Money In')            return mi;
+                  if (h === 'Money Out')           return mo;
+                  if (h === 'Fee')                 return fe;
+                  if (h === 'Balance')             return Number(tx.balance) || 0;
+                  return '';
+                });
+                collected.push(out);
+                pdfTxCount++;
+              }
+            } catch (e) {
+              Logger.log('PDF parse failed for ' + name + ': ' + e);
+            }
+            continue;
           }
         }
       }
@@ -205,7 +254,17 @@
     if (collected.length) {
       sheet.getRange(2, 1, collected.length, h.length).setValues(collected);
     }
-    Logger.log('Pulled ' + collected.length + ' rows from ' + threads.length + ' threads.');
+    Logger.log('Pulled ' + collected.length + ' rows. CSV files: ' + csvCount + ', PDF files: ' + pdfCount + ' (' + pdfTxCount + ' tx from AI parsing)' + (aiEnabled ? '' : ' [AI disabled — set GEMINI_API_KEY to parse PDFs]'));
+  }
+
+  // Decide whether a PDF looks like a bank statement worth sending to Gemini.
+  // Avoids spending API calls on invoices, receipts, random PDFs in your inbox.
+  function isBankStatementPdf_(att, msg) {
+    const name = (att.getName() || '').toLowerCase();
+    if (name.includes('statement') || name.includes('capitec') || name.startsWith('account_')) return true;
+    const from = (msg.getFrom() || '').toLowerCase();
+    if (from.includes('capitec') || from.includes('@capitecbank')) return true;
+    return false;
   }
 
   // ============================================================================
