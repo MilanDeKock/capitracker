@@ -331,15 +331,22 @@ function BudgetTracker() {
     });
   };
 
-  async function loadFromSheet({ pull = false } = {}) {
+  // pullMode: null = just reload from Sheet (no Gmail fetch)
+  //           'csv' = pull CSV statements only (fast, ~5s)
+  //           'pdf' = parse PDFs via Gemini (slow, ~3min per PDF)
+  //           'all' = both (legacy / mixed-source users)
+  async function loadFromSheet({ pull = false, pullMode = null } = {}) {
     if (!config.sheetUrl || !config.sheetToken) {
       setSyncStatus({ kind: 'err', message: 'Configure Sheet URL & token in Setup first.', when: new Date() });
       return;
     }
     setLoading(true);
     setSyncStatus(null);
+    const action = pullMode === 'csv' ? 'pull-csv'
+                 : pullMode === 'pdf' ? 'pull-pdf'
+                 : pull ? 'pull' : 'load';
     try {
-      const data = await sheetFetch(config, pull ? 'pull' : 'load');
+      const data = await sheetFetch(config, action);
       const nRaw     = (data.rawStatements || []).map(normalizeRow).filter(t => t.date && t.amount !== 0);
       const nHist    = (data.transactions  || []).map(normalizeRow).filter(t => t.date);
       const nBudget  = (data.budget || []).map(r => ({ line: String(r.Line || ''), amount: Number(r.Amount) || 0 })).filter(b => b.line);
@@ -355,10 +362,13 @@ function BudgetTracker() {
       setRules(nRules);
       setSettings(nSettings);
       saveLS(K.cache, { rawStatements: nRaw, history: nHist, budget: nBudget, rules: nRules, settings: nSettings });
+      const sourceLabel = pullMode === 'csv' ? 'CSV statements'
+                        : pullMode === 'pdf' ? 'PDF statements (AI-parsed)'
+                        : pull ? 'Gmail' : null;
       setSyncStatus({
         kind: 'ok',
-        message: pull
-          ? `Pulled from Gmail. ${nRaw.length} raw rows, ${nHist.length} in history.`
+        message: sourceLabel
+          ? `Pulled ${sourceLabel}. ${nRaw.length} raw rows, ${nHist.length} in history.`
           : `Loaded. ${nRaw.length} raw rows, ${nHist.length} in history.`,
         when: new Date(),
       });
@@ -702,7 +712,8 @@ function BudgetTracker() {
           clear={() => { setCsvRows([]); setFileNames([]); }}
           configured={configured}
           loading={loading}
-          onSync={() => loadFromSheet({ pull: true })}
+          onSyncCsv={() => loadFromSheet({ pullMode: 'csv' })}
+          onSyncPdf={() => loadFromSheet({ pullMode: 'pdf' })}
           onReload={() => loadFromSheet()}
         />
       </div>
@@ -781,7 +792,7 @@ function BudgetTracker() {
 /* ============================================================================
    Components
    ========================================================================== */
-function Uploader({ onFiles, fileNames, error, clear, configured, loading, onSync, onReload }) {
+function Uploader({ onFiles, fileNames, error, clear, configured, loading, onSyncCsv, onSyncPdf, onReload }) {
   const [hover, setHover] = useState(false);
   return (
     <div
@@ -800,8 +811,15 @@ function Uploader({ onFiles, fileNames, error, clear, configured, loading, onSyn
         <div className="flex items-center gap-2">
           {configured && (
             <>
-              <button onClick={onSync} disabled={loading} className="px-2.5 py-1 text-xs uppercase tracking-wider font-medium border border-slate-800 text-slate-800 hover:bg-slate-800 hover:text-stone-50 disabled:opacity-50 flex items-center gap-1.5">
-                <IconRefresh className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />Sync Gmail
+              <button onClick={onSyncCsv} disabled={loading}
+                      title="Pull CSV statements you've forwarded to Gmail. Fast (~5s)."
+                      className="px-2.5 py-1 text-xs uppercase tracking-wider font-medium border border-slate-800 text-slate-800 hover:bg-slate-800 hover:text-stone-50 disabled:opacity-50 flex items-center gap-1.5">
+                <IconRefresh className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />Sync CSV
+              </button>
+              <button onClick={() => { if (confirm('PDF parsing via Gemini takes ~3 min per statement. Continue?')) onSyncPdf(); }} disabled={loading}
+                      title="Parse Capitec PDF statements via Gemini AI. Slow (~3 min per PDF) — needs GEMINI_API_KEY set in Apps Script."
+                      className="px-2.5 py-1 text-xs uppercase tracking-wider font-medium border border-indigo-700 text-indigo-700 hover:bg-indigo-700 hover:text-stone-50 disabled:opacity-50 flex items-center gap-1.5">
+                <IconRefresh className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />Sync PDF (AI)
               </button>
               <button onClick={onReload} disabled={loading} className="px-2.5 py-1 text-xs uppercase tracking-wider font-medium border border-stone-300 text-stone-700 hover:bg-stone-100 disabled:opacity-50">
                 Reload sheet
