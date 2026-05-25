@@ -816,7 +816,7 @@ function Uploader({ onFiles, fileNames, error, clear, configured, loading, onSyn
                       className="px-2.5 py-1 text-xs uppercase tracking-wider font-medium border border-slate-800 text-slate-800 hover:bg-slate-800 hover:text-stone-50 disabled:opacity-50 flex items-center gap-1.5">
                 <IconRefresh className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />Sync CSV
               </button>
-              <button onClick={() => { if (confirm('PDF parsing via Gemini takes ~3 min per statement. Continue?')) onSyncPdf(); }} disabled={loading}
+              <button onClick={() => { if (confirm('PDF parsing via Gemini takes ~3 min per statement. Go make a coffee ☕')) onSyncPdf(); }} disabled={loading}
                       title="Parse Capitec PDF statements via Gemini AI. Slow (~3 min per PDF) — needs GEMINI_API_KEY set in Apps Script."
                       className="px-2.5 py-1 text-xs uppercase tracking-wider font-medium border border-indigo-700 text-indigo-700 hover:bg-indigo-700 hover:text-stone-50 disabled:opacity-50 flex items-center gap-1.5">
                 <IconRefresh className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />Sync PDF (AI)
