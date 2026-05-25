@@ -8,9 +8,10 @@
 
 A single-file budget tracker for South African bank statements. Reads CSVs you email to yourself (or PDF statements Capitec emails you directly, parsed by Gemini AI), classifies transactions with simple rules, and shows you how the current pay cycle is tracking against your budget.
 
-**Built specifically for Capitec CSVs** (main account + credit card). The rule-matching logic is generic, but the CSV ingest assumes Capitec's exact column layout (`Money In` / `Money Out` / `Fee` split, plus an auto-populated `Category` column). Other SA banks (FNB, Standard Bank, Nedbank, ABSA) use different column names and don't auto-categorise — adapting to them is a real porting job, not drop-in. PRs welcome.
+**Two ingest modes:**
 
-**Optional AI PDF parsing.** Capitec also emails monthly PDF statements directly. If you'd rather not forward CSVs every week, you can plug in a free Google Gemini API key and let AI extract transactions straight from the PDF — same Sheet, same rules, no CSV needed. See [Setup → AI PDF parsing](#optional-enable-ai-pdf-parsing).
+- **CSV mode** (built for Capitec). The CSV ingest assumes Capitec's exact column layout. Other SA banks (FNB, Standard Bank, Nedbank, ABSA, TymeBank, etc.) use different column names — adapting CSV ingest to them is per-bank work; PRs welcome.
+- **PDF mode via Google Gemini AI** (works for any SA bank). Plug in a free Gemini API key and the AI extracts transactions directly from your bank's PDF statement — Capitec, FNB, Standard Bank, Nedbank, ABSA, TymeBank, Investec, Discovery, or any similar. No per-bank parser needed. See [Setup → AI PDF parsing](#optional-enable-ai-pdf-parsing).
 
 ## Why
 
@@ -96,7 +97,7 @@ If you'd rather skip the CSV-forwarding step entirely, Capitec emails monthly PD
 - **Split transactions across budget lines** — one bank transaction, multiple budget categories. e.g. a R3,000 savings transfer where R2,000 is real savings and R1,000 is a sinking fund. Works on any transaction from the moment it appears — no need to post to history first. Splits feed the dashboard's Budget vs Actual and the Running watch as if they were separate transactions.
 - **Move a transaction to a different cycle** — for late-reflecting payments or pre-payments. Click the small cycle pill on any row to remap which pay cycle the transaction counts in (previous / default / next). The actual Posting Date never changes — only which cycle it counts toward in your budget.
 - **Apply credits and income to budget lines** — got a R300 gift, refund, or reimbursement? Tag it to a budget line (e.g. "Eating Out") and it reduces that line's actual spend for the cycle. Useful for net-of-refund tracking and treating cash income as an offset to specific categories.
-- **AI PDF parsing (optional, opt-in)** — plug in a free Google Gemini API key and CapiTracker will extract transactions directly from Capitec's PDF statements. No more forwarding CSVs every week. Bring-your-own-key — the maintainer never sees your data or pays for your API calls.
+- **AI PDF parsing (optional, opt-in, any SA bank)** — plug in a free Google Gemini API key and CapiTracker extracts transactions directly from any major SA bank's PDF statement (Capitec, FNB, Standard Bank, Nedbank, ABSA, TymeBank, Investec, Discovery). No per-bank parser needed — AI handles layout differences. Bring-your-own-key; the maintainer never sees your data or pays for your API calls.
 - **Two sync modes** — separate **Sync CSV** (fast, ~5 sec) and **Sync PDF (AI)** (slow, ~3 min) buttons so CSV users aren't waiting on AI they don't need.
 - **Dedup on import** — re-imports the same CSV without creating duplicate rows.
 - **Multi-account merge** — all your Capitec accounts (main, credit card, savings, etc.) feed into one ledger, with each row tagged by account.
@@ -167,11 +168,12 @@ They **cannot:**
 
 Please don't open public Issues for security problems. See [SECURITY.md](SECURITY.md).
 
-## Contributing — help make this work for your bank
+## Contributing — help make this work for everyone
 
-Right now CapiTracker only really works with Capitec CSVs. If you bank elsewhere and want to use this — **open an issue or a PR**. The kind of contributions that are welcome:
+CapiTracker works for any major SA bank in **AI PDF mode** out of the box. CSV mode is still Capitec-only — that's where most contribution work is. Either way, contributions welcome:
 
-- **Other SA bank parsers** — FNB, Standard Bank, Nedbank, ABSA, Investec, Discovery, TymeBank. The bank-specific bit lives in the CSV ingest inside `apps_script.gs`. Everything else is bank-agnostic.
+- **Test PDF parsing with your bank** — if you bank with FNB, Standard Bank, Nedbank, ABSA, TymeBank, Investec, or Discovery, enable AI mode, run Sync PDF, and tell us how it goes. Worked perfectly? Open an issue confirming "AI mode works on `<bank>`". Hit a snag? Paste the relevant log + a few example rows the AI got wrong, we'll tune the prompt.
+- **CSV parsers for other banks** — the CSV ingest in `apps_script.gs` is Capitec-specific. Adding FNB / Standard Bank / etc. is per-bank work — column header mapping, sign conventions. PRs welcome if you'd rather have CSV mode for your bank than rely on AI.
 - **Bug reports** — anything weird, broken, or confusing, drop it in [Issues](https://github.com/MilanDeKock/capitracker/issues).
 - **Feature ideas** — pay-cycle visualisations, alerts, mobile polish, export options. Open an issue first so we can chat before you build.
 

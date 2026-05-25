@@ -33,12 +33,12 @@
   // ============================================================================
   const SHARED_TOKEN = 'CHANGE-ME-TO-A-LONG-RANDOM-STRING';
   const BANK_EMAIL   = 'your-email@example.com';
-  // Two senders to handle:
-  //   1. CSVs you email to yourself  → from:me
-  //   2. Capitec PDF statements sent directly by the bank → from:noreply@capitecbank.co.za
+  // We accept statements from:
+  //   1. Yourself (CSVs you forward)                → from:me
+  //   2. Any major SA bank's automated email sender → bank domain match
   // Per-attachment filters inside pullStatements_ narrow down to actual
   // statement files, so a broader Gmail query is safe.
-  const GMAIL_QUERY  = '(from:me OR from:noreply@capitecbank.co.za) newer_than:30d has:attachment';
+  const GMAIL_QUERY  = '(from:me OR from:capitecbank.co.za OR from:fnb.co.za OR from:standardbank.co.za OR from:nedbank.co.za OR from:absa.co.za OR from:tymebank.co.za OR from:investec.com OR from:discoverybank.co.za) newer_than:30d has:attachment';
 
   // ============================================================================
   // TAB DEFINITIONS
@@ -277,12 +277,17 @@
 
   // Decide whether a PDF looks like a bank statement worth sending to Gemini.
   // Avoids spending API calls on invoices, receipts, random PDFs in your inbox.
+  // Bank-agnostic: matches any major SA bank by sender domain or by common
+  // statement filename patterns.
+  const BANK_DOMAINS_ = [
+    'capitec', 'fnb', 'standardbank', 'nedbank', 'absa', 'tymebank',
+    'investec', 'discovery', 'sbsa',
+  ];
   function isBankStatementPdf_(att, msg) {
     const name = (att.getName() || '').toLowerCase();
-    if (name.includes('statement') || name.includes('capitec') || name.startsWith('account_')) return true;
+    if (name.includes('statement') || name.startsWith('account_')) return true;
     const from = (msg.getFrom() || '').toLowerCase();
-    if (from.includes('capitec') || from.includes('@capitecbank')) return true;
-    return false;
+    return BANK_DOMAINS_.some(d => from.includes(d));
   }
 
   // ============================================================================
@@ -531,19 +536,22 @@
   const GEMINI_MODEL = 'gemini-2.5-flash';
 
   const GEMINI_PROMPT = [
-    'You are parsing a South African bank statement (typically Capitec) into structured transaction data.',
+    'You are parsing a South African bank statement into structured transaction data.',
+    'The statement could be from any SA bank — Capitec, FNB, Standard Bank, Nedbank, ABSA, TymeBank, Investec, Discovery, or similar. The layout, column headings, and terminology vary by bank; infer the structure from context.',
     '',
     'For each transaction row, extract:',
     '- postingDate (YYYY-MM-DD)',
     '- transactionDate (YYYY-MM-DD; same as posting date if not separately shown)',
-    '- description (the merchant or transaction description)',
-    '- originalDescription (raw description verbatim)',
+    '- description (the merchant or transaction description, cleaned up)',
+    '- originalDescription (raw description verbatim from the statement)',
     '- moneyIn  (POSITIVE number for deposits/credits, 0 otherwise)',
     '- moneyOut (NEGATIVE number for debits/spending, 0 otherwise)',
     '- fee      (NEGATIVE number for fees, 0 otherwise)',
     '- balance  (running balance after the transaction)',
     '',
-    'Skip header rows, footer rows, page numbers, totals, summary lines, and anything that is not an actual transaction.',
+    'Many SA banks present amounts as a single signed column (e.g. -100.00) or as "Debit" / "Credit" columns. Map them onto moneyIn / moneyOut / fee with the sign rules above, regardless of the source layout.',
+    '',
+    'Skip header rows, footer rows, page numbers, totals, summary lines, account holder details, and anything that is not an actual transaction.',
     '',
     'CRITICAL: moneyOut and fee MUST be NEGATIVE numbers. A R100 debit appears as moneyOut: -100. A R5 fee appears as fee: -5. Positive moneyOut values break downstream budget math.',
     '',
