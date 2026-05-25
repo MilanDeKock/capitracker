@@ -646,8 +646,15 @@ function BudgetTracker() {
         scopeLabel = 'current cycle window';
       }
 
-      // Hard cap so we don't blow the context window on big histories.
-      const MAX_TX_IN_PROMPT = 600;
+      // Hard cap so we don't blow the context window on big histories OR
+      // burn through the per-minute token quota on the free tier. 150 rows
+      // ≈ 3-5K tokens per turn, which keeps a normal chat session well
+      // within free-tier limits (10 RPM, ~250K TPM on gemini-2.5-flash).
+      // For questions that need more rows ("show me all my Pick n Pay txs"),
+      // widen the chat scope or narrow the dashboard window first.
+      const MAX_TX_IN_PROMPT = 150;
+      // Send the MOST RECENT rows when truncating, since that's what users
+      // most commonly ask about (txs come pre-sorted newest-first in allTxs).
       const txs = scopeTxs.slice(0, MAX_TX_IN_PROMPT).map(mapTx);
       const truncated = scopeTxs.length > MAX_TX_IN_PROMPT;
 
