@@ -562,7 +562,7 @@
   // Preference order: PDFs with "statement" or "capitec" in the name,
   // then any PDF as a fallback.
   function testPdfParse() {
-    const threads = GmailApp.search('(from:me OR from:noreply@capitecbank.co.za) newer_than:90d has:attachment', 0, 30);
+    const threads = GmailApp.search('from:me newer_than:90d has:attachment', 0, 30);
     for (const wantStatement of [true, false]) {
       for (const thread of threads) {
         for (const msg of thread.getMessages()) {
