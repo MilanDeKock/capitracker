@@ -63,13 +63,14 @@ const IconSplit     = (p) => <Icon {...p} d={<><polyline points="16 3 21 3 21 8"
    Storage keys & helpers (localStorage)
    ========================================================================== */
 const K = {
-  config:         'bt.config',         // {sheetUrl, sheetToken}
-  cache:          'bt.cache',          // last loaded snapshot — offline fallback only
-  overrides:      'bt.overrides',      // hash → line, for rows not yet posted to history
-  splitOverrides: 'bt.splitOverrides', // hash → splits[], for rows not yet posted to history
-  tab:            'bt.tab',            // last selected tab
-  privateMode:    'bt.privateMode',    // blur sensitive amounts (eye toggle)
-  watchLine:      'bt.watchLine',      // which budget line the Running Watch panel is showing
+  config:              'bt.config',              // {sheetUrl, sheetToken}
+  cache:               'bt.cache',               // last loaded snapshot — offline fallback only
+  overrides:           'bt.overrides',           // hash → line, for rows not yet posted to history
+  splitOverrides:      'bt.splitOverrides',      // hash → splits[], for rows not yet posted to history
+  budgetDateOverrides: 'bt.budgetDateOverrides', // hash → 'YYYY-MM-DD', for rows not yet posted to history
+  tab:                 'bt.tab',                 // last selected tab
+  privateMode:         'bt.privateMode',         // blur sensitive amounts (eye toggle)
+  watchLine:           'bt.watchLine',           // which budget line the Running Watch panel is showing
 };
 const loadLS = (k, fallback) => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fallback; } catch { return fallback; } };
 const saveLS = (k, v)        => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
@@ -129,6 +130,17 @@ function prettyCycle(cycleStartISO, anchorDay) {
   const sStr = s.toLocaleDateString('en-ZA', { day: '2-digit', month: 'short' });
   const eStr = e.toLocaleDateString('en-ZA', { day: '2-digit', month: 'short', year: 'numeric' });
   return `${sStr} – ${eStr}`;
+}
+function shortCycleLabel(cycleStartISO) {
+  const d = parseISO(cycleStartISO);
+  if (!d) return '—';
+  return d.toLocaleDateString('en-ZA', { month: 'short', year: '2-digit' });
+}
+function shiftCycle(cycleStartISO, months) {
+  const d = parseISO(cycleStartISO);
+  if (!d) return null;
+  d.setMonth(d.getMonth() + months);
+  return toISO(d);
 }
 
 /* ============================================================================
@@ -198,9 +210,13 @@ function normalizeRow(r) {
     amount: mi + mo + fe,
     line: r['Line'] || null,
     splits: parseSplits(r['Splits']),
+    budgetDate: (r['Budget Date'] ? String(r['Budget Date']).slice(0, 10) : '') || null,
     postedAt: r['Posted At'] || null,
   };
 }
+// Date used for budget/cycle calculations. Budget Date overrides Posting Date,
+// letting a row count in a different cycle without changing its actual date.
+const effectiveDate = t => t.budgetDate || t.date;
 function denormalizeRow(t) {
   return {
     'Account': t.account,
@@ -215,6 +231,7 @@ function denormalizeRow(t) {
     'Fee': t.fee,
     'Line': t.line,
     'Splits': serializeSplits(t.splits),
+    'Budget Date': t.budgetDate || '',
   };
 }
 const txHash = t => `${t.date}|${(t.originalDesc || t.description || '').toLowerCase()}|${(t.amount || 0).toFixed(2)}`;
@@ -283,6 +300,7 @@ function BudgetTracker() {
   const [history, setHistory]             = useState(cached.history        || []);
   const [overrides, setOverrides]         = useState(() => loadLS(K.overrides, {}));
   const [splitOverrides, setSplitOverrides] = useState(() => loadLS(K.splitOverrides, {}));
+  const [budgetDateOverrides, setBudgetDateOverrides] = useState(() => loadLS(K.budgetDateOverrides, {}));
   const [csvRows, setCsvRows]             = useState([]);
   const [fileNames, setFileNames]         = useState([]);
   const [tab, setTab]                     = useState(() => {
@@ -299,6 +317,7 @@ function BudgetTracker() {
   useEffect(() => saveLS(K.config, config),       [config]);
   useEffect(() => saveLS(K.overrides, overrides), [overrides]);
   useEffect(() => saveLS(K.splitOverrides, splitOverrides), [splitOverrides]);
+  useEffect(() => saveLS(K.budgetDateOverrides, budgetDateOverrides), [budgetDateOverrides]);
   useEffect(() => saveLS(K.tab, tab),             [tab]);
   useEffect(() => saveLS(K.privateMode, privateMode), [privateMode]);
 
@@ -396,11 +415,12 @@ function BudgetTracker() {
       const auto = classify(t, rules);
       const line = overrides[h] || auto;
       const splits = splitOverrides[h] || null;
-      out.push({ ...t, inHistory: false, hash: h, line, splits });
+      const budgetDate = budgetDateOverrides[h] || null;
+      out.push({ ...t, inHistory: false, hash: h, line, splits, budgetDate });
     }
     out.sort((a, b) => b.date.localeCompare(a.date));
     return out;
-  }, [history, rawStatements, csvRows, rules, overrides, splitOverrides]);
+  }, [history, rawStatements, csvRows, rules, overrides, splitOverrides, budgetDateOverrides]);
 
   // Default date range — current cycle
   const defaultRange = useMemo(() => {
@@ -416,21 +436,29 @@ function BudgetTracker() {
   useEffect(() => { setDateRange(defaultRange); }, [defaultRange]);
 
   const windowTxs = useMemo(
-    () => allTxs.filter(t => t.date >= dateRange.from && t.date <= dateRange.to),
+    () => allTxs.filter(t => {
+      const d = effectiveDate(t);
+      return d >= dateRange.from && d <= dateRange.to;
+    }),
     [allTxs, dateRange],
   );
 
-  // Aggregate spend per budget line. Splits override the row's single Line:
-  // if a row has Splits, distribute its amount across those listed lines instead.
+  // Aggregate net spend per budget line. Spends (amount < 0) add to the line's
+  // actual; credits/income (amount > 0) subtract. Splits distribute across
+  // multiple lines, with the row's sign carrying the direction.
+  // Income explicitly tagged as Salary/Other Income (or any line not in the
+  // budget) simply doesn't appear in the Budget vs Actual table — the user
+  // chooses by classification whether a deposit should offset a budget line.
   const actuals = useMemo(() => {
     const a = {};
     for (const b of budget) a[b.line] = 0;
     for (const t of windowTxs) {
-      if (t.amount >= 0) continue;
+      if (!t.amount) continue;
+      const sign = t.amount < 0 ? 1 : -1;
       if (t.splits && t.splits.length) {
         for (const s of t.splits) {
           if (a[s.line] === undefined) a[s.line] = 0;
-          a[s.line] += Math.abs(s.amount);
+          a[s.line] += sign * Math.abs(s.amount);
         }
       } else {
         if (a[t.line] === undefined) a[t.line] = 0;
@@ -442,7 +470,10 @@ function BudgetTracker() {
 
   const allCycles = useMemo(() => {
     const set = new Set();
-    for (const t of allTxs) if (t.date) set.add(cycleKey(t.date, settings.anchorDay));
+    for (const t of allTxs) {
+      const d = effectiveDate(t);
+      if (d) set.add(cycleKey(d, settings.anchorDay));
+    }
     return Array.from(set).sort();
   }, [allTxs, settings.anchorDay]);
 
@@ -450,13 +481,14 @@ function BudgetTracker() {
     const result = {};
     for (const cy of allCycles) result[cy] = {};
     for (const t of allTxs) {
-      if (t.amount >= 0) continue;
-      const cy = cycleKey(t.date, settings.anchorDay);
+      if (!t.amount) continue;
+      const sign = t.amount < 0 ? 1 : -1;
+      const cy = cycleKey(effectiveDate(t), settings.anchorDay);
       if (!result[cy]) result[cy] = {};
       if (t.splits && t.splits.length) {
         for (const s of t.splits) {
           if (!result[cy][s.line]) result[cy][s.line] = 0;
-          result[cy][s.line] += Math.abs(s.amount);
+          result[cy][s.line] += sign * Math.abs(s.amount);
         }
       } else {
         if (!result[cy][t.line]) result[cy][t.line] = 0;
@@ -494,9 +526,15 @@ function BudgetTracker() {
       cacheSnapshot({ history: nextHistory });
       const newOv = { ...overrides };
       const newSplitOv = { ...splitOverrides };
-      for (const t of newClassified) { delete newOv[t.hash]; delete newSplitOv[t.hash]; }
+      const newBudgetDateOv = { ...budgetDateOverrides };
+      for (const t of newClassified) {
+        delete newOv[t.hash];
+        delete newSplitOv[t.hash];
+        delete newBudgetDateOv[t.hash];
+      }
       setOverrides(newOv);
       setSplitOverrides(newSplitOv);
+      setBudgetDateOverrides(newBudgetDateOv);
       setSyncStatus({ kind: 'ok', message: `Posted ${res.appended} row(s) to history.`, when: new Date() });
     } catch (e) {
       setSyncStatus({ kind: 'err', message: e.message || String(e), when: new Date() });
@@ -548,6 +586,30 @@ function BudgetTracker() {
       setSyncStatus({ kind: 'ok', message: 'Removed from history.', when: new Date() });
     } catch (e) {
       setSyncStatus({ kind: 'err', message: 'Delete failed: ' + (e.message || String(e)), when: new Date() });
+    }
+  }
+
+  async function handleUpdateBudgetDate(hash, budgetDate) {
+    // budgetDate is 'YYYY-MM-DD' or null/empty to clear.
+    // In-history rows write straight to Sheet; new rows go to local
+    // budgetDateOverrides state until posted.
+    const isInHistory = history.some(t => txHash(t) === hash);
+    const cleaned = budgetDate || null;
+    if (isInHistory) {
+      setHistory(h => h.map(t => txHash(t) === hash ? { ...t, budgetDate: cleaned } : t));
+      try {
+        await sheetFetch(config, null, { action: 'update-budget-date', hash, budgetDate: cleaned || '' });
+        setSyncStatus({ kind: 'ok', message: cleaned ? 'Cycle override saved.' : 'Cycle override cleared.', when: new Date() });
+      } catch (e) {
+        setSyncStatus({ kind: 'err', message: 'Cycle override failed: ' + (e.message || String(e)), when: new Date() });
+      }
+    } else {
+      setBudgetDateOverrides(o => {
+        const n = { ...o };
+        if (cleaned) n[hash] = cleaned;
+        else         delete n[hash];
+        return n;
+      });
     }
   }
 
@@ -681,6 +743,7 @@ function BudgetTracker() {
                                       onEditHistoryLine={handleEditHistoryLine}
                                       onDeleteHistoryRow={handleDeleteHistoryRow}
                                       onUpdateSplits={handleUpdateSplits}
+                                      onUpdateBudgetDate={handleUpdateBudgetDate}
                                       posting={loading}
                                       newCount={newTxs.length}
                                       newClassifiedCount={newClassified.length}
@@ -835,25 +898,22 @@ function Dashboard({ budget, actuals, settings, dateRange, setDateRange, default
   const watchLine = budgetLineNames.includes(storedWatchLine)
     ? storedWatchLine
     : (budgetLineNames.includes('Bok Fonds') ? 'Bok Fonds' : (budgetLineNames[0] || ''));
-  // Build the watched-line spend list. Split rows show only the portion
-  // allocated to the watch line (with a "(split)" suffix in the description
-  // so the running total visibly matches the budget logic).
+  // Build the watched-line activity list. Spends (negative) add to the running
+  // total; credits/income (positive) subtract. Split rows contribute only their
+  // portion of the watched line, with the row's sign preserved.
   const watchTx = windowTxs.flatMap(t => {
-    if (t.amount >= 0) return [];
+    if (!t.amount) return [];
     if (t.splits && t.splits.length) {
       const match = t.splits.find(s => s.line === watchLine);
       if (!match) return [];
-      return [{
-        ...t,
-        amount: -Math.abs(match.amount),
-        description: `${t.description} (split)`,
-      }];
+      const signed = t.amount < 0 ? -Math.abs(match.amount) : Math.abs(match.amount);
+      return [{ ...t, amount: signed, description: `${t.description} (split)` }];
     }
     return t.line === watchLine ? [t] : [];
-  }).sort((a, b) => a.date.localeCompare(b.date));
+  }).sort((a, b) => effectiveDate(a).localeCompare(effectiveDate(b)));
   const watchBudget = budget.find(b => b.line === watchLine)?.amount || 0;
   let watchRun = 0;
-  const watchWithRun = watchTx.map(t => { watchRun += Math.abs(t.amount); return { ...t, running: watchRun }; });
+  const watchWithRun = watchTx.map(t => { watchRun -= t.amount; return { ...t, running: watchRun }; });
 
   return (
     <div className="space-y-6">
@@ -997,12 +1057,15 @@ function Dashboard({ budget, actuals, settings, dateRange, setDateRange, default
                 </thead>
                 <tbody>
                   {watchWithRun.map((t, i) => {
-                    const over = watchBudget > 0 && t.running > watchBudget;
+                    const over   = watchBudget > 0 && t.running > watchBudget;
+                    const credit = t.amount > 0;
                     return (
                       <tr key={t.hash || i} className={`border-b border-stone-100 ${over ? 'bg-red-50' : ''}`}>
-                        <td className="px-5 py-1.5 font-num text-stone-600 text-xs">{t.date}</td>
+                        <td className="px-5 py-1.5 font-num text-stone-600 text-xs">{effectiveDate(t)}</td>
                         <td className="px-3 py-1.5 truncate max-w-md">{t.description}</td>
-                        <td className="px-3 py-1.5 text-right font-num">{fmt(Math.abs(t.amount))}</td>
+                        <td className={`px-3 py-1.5 text-right font-num ${credit ? 'text-emerald-700' : 'text-stone-900'}`}>
+                          {credit ? '−' : ''}{fmt(Math.abs(t.amount))}
+                        </td>
                         <td className={`px-5 py-1.5 text-right font-num font-medium ${over ? 'text-red-700' : ''}`}>{fmt(t.running)}</td>
                       </tr>
                     );
@@ -1020,7 +1083,7 @@ function Dashboard({ budget, actuals, settings, dateRange, setDateRange, default
 /* ============================================================================
    Transactions
    ========================================================================== */
-function Transactions({ allTxs, lineNames, overrides, setOverride, clearOverride, anchorDay, onPostToHistory, onEditHistoryLine, onDeleteHistoryRow, onUpdateSplits, posting, newCount, newClassifiedCount, stillNeedingReview }) {
+function Transactions({ allTxs, lineNames, overrides, setOverride, clearOverride, anchorDay, onPostToHistory, onEditHistoryLine, onDeleteHistoryRow, onUpdateSplits, onUpdateBudgetDate, posting, newCount, newClassifiedCount, stillNeedingReview }) {
   const [filterLine, setFL]     = useState('');
   const [filterCycle, setFC]    = useState('');
   const [filterStatus, setFS]   = useState('');
@@ -1028,6 +1091,7 @@ function Transactions({ allTxs, lineNames, overrides, setOverride, clearOverride
   const [selected, setSelected] = useState(() => new Set());
   const [bulkLine, setBulkLine] = useState('');
   const [splitModalTx, setSplitModalTx] = useState(null);
+  const [cycleEditorTx, setCycleEditorTx] = useState(null);
 
   const cycles = useMemo(() => {
     const s = new Set();
@@ -1183,7 +1247,21 @@ function Transactions({ allTxs, lineNames, overrides, setOverride, clearOverride
                       <input type="checkbox" checked={isSelected} onChange={() => toggleOne(t.hash)}
                              className="cursor-pointer" />
                     </td>
-                    <td className="px-5 py-1.5 font-num text-xs text-stone-600">{t.date}</td>
+                    <td className="px-5 py-1.5 font-num text-xs">
+                      <div className="text-stone-600">{t.date}</div>
+                      {(() => {
+                        const naturalCycle = cycleKey(t.date, anchorDay);
+                        const effCycle = cycleKey(effectiveDate(t), anchorDay);
+                        const overrideActive = naturalCycle !== effCycle;
+                        return (
+                          <button onClick={() => setCycleEditorTx(t)}
+                                  className={`mt-0.5 text-[10px] px-1.5 py-0.5 border ${overrideActive ? 'border-indigo-300 bg-indigo-50 text-indigo-800 hover:bg-indigo-100' : 'border-stone-200 text-stone-500 hover:bg-stone-100 hover:text-stone-700'}`}
+                                  title="Change which cycle this transaction counts toward">
+                            {shortCycleLabel(effCycle)}
+                          </button>
+                        );
+                      })()}
+                    </td>
                     <td className="px-3 py-1.5 text-xs text-stone-500">{t.account}</td>
                     <td className="px-3 py-1.5 truncate" style={{ maxWidth: '20rem' }} title={`${t.description}${t.originalDesc && t.originalDesc !== t.description ? '\n' + t.originalDesc : ''}`}>{t.description}</td>
                     <td className="px-3 py-1.5 text-xs text-stone-500">{t.bankCategory}</td>
@@ -1270,6 +1348,79 @@ function Transactions({ allTxs, lineNames, overrides, setOverride, clearOverride
           onSave={(splits) => { onUpdateSplits(splitModalTx.hash, splits); setSplitModalTx(null); }}
         />
       )}
+
+      {cycleEditorTx && (
+        <CycleEditor
+          tx={cycleEditorTx}
+          anchorDay={anchorDay}
+          onClose={() => setCycleEditorTx(null)}
+          onSave={(budgetDate) => { onUpdateBudgetDate(cycleEditorTx.hash, budgetDate); setCycleEditorTx(null); }}
+        />
+      )}
+    </div>
+  );
+}
+
+/* ============================================================================
+   Cycle editor — move a transaction into a different pay cycle without
+   touching its actual Posting Date. Internally we store a Budget Date in
+   the picked cycle so all the existing date-based math keeps working.
+   ========================================================================== */
+function CycleEditor({ tx, anchorDay, onClose, onSave }) {
+  const naturalCycleStart = cycleKey(tx.date, anchorDay);
+  const currentCycleStart = cycleKey(effectiveDate(tx), anchorDay);
+  const prevCycleStart    = shiftCycle(naturalCycleStart, -1);
+  const nextCycleStart    = shiftCycle(naturalCycleStart, 1);
+  const hasOverride       = !!tx.budgetDate;
+
+  const optionClass = (isSelected) =>
+    `w-full text-left px-3 py-2 border text-sm hover:bg-stone-50 ${
+      isSelected ? 'border-indigo-400 bg-indigo-50' : 'border-stone-300'
+    }`;
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={onClose}>
+      <div className="bg-white rounded-sm shadow-xl border border-stone-300 max-w-sm w-full" onClick={e => e.stopPropagation()}>
+        <div className="px-5 py-3 border-b border-stone-200 flex items-center justify-between">
+          <h3 className="font-display text-lg">Move to cycle</h3>
+          <button onClick={onClose} className="text-stone-400 hover:text-stone-900"><IconX className="w-4 h-4" /></button>
+        </div>
+        <div className="px-5 py-4">
+          <div className="text-xs text-stone-500 mb-1">{tx.date}</div>
+          <div className="text-sm text-stone-700 mb-3 truncate">{tx.description}</div>
+          <div className="text-xs text-stone-500 mb-3">
+            Currently counts toward: <span className="font-medium text-stone-800">{prettyCycle(currentCycleStart, anchorDay)}</span>
+          </div>
+
+          <div className="space-y-2">
+            <button onClick={() => onSave(prevCycleStart)}
+                    className={optionClass(currentCycleStart === prevCycleStart)}>
+              <div className="flex items-center justify-between gap-3">
+                <span>← Previous cycle</span>
+                <span className="text-xs text-stone-500 font-num">{prettyCycle(prevCycleStart, anchorDay)}</span>
+              </div>
+            </button>
+            <button onClick={() => onSave(null)}
+                    className={optionClass(!hasOverride)}>
+              <div className="flex items-center justify-between gap-3">
+                <span>Default <span className="text-stone-500 text-xs">(by actual date)</span></span>
+                <span className="text-xs text-stone-500 font-num">{prettyCycle(naturalCycleStart, anchorDay)}</span>
+              </div>
+            </button>
+            <button onClick={() => onSave(nextCycleStart)}
+                    className={optionClass(currentCycleStart === nextCycleStart)}>
+              <div className="flex items-center justify-between gap-3">
+                <span>Next cycle →</span>
+                <span className="text-xs text-stone-500 font-num">{prettyCycle(nextCycleStart, anchorDay)}</span>
+              </div>
+            </button>
+          </div>
+
+          <p className="text-[11px] text-stone-500 mt-3 leading-relaxed">
+            The transaction's actual Posting Date never changes. We just remap which pay cycle it counts toward in budgets and dashboards.
+          </p>
+        </div>
+      </div>
     </div>
   );
 }

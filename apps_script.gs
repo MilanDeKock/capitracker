@@ -51,7 +51,7 @@
 
   const HEADERS = {
     [T_RAW]:      ['Nr','Account','Posting Date','Transaction Date','Description','Original Description','Parent Category','Category','Money In','Money Out','Fee','Balance'],
-    [T_HISTORY]:  ['Account','Posting Date','Transaction Date','Description','Original Description','Parent Category','Category','Money In','Money Out','Fee','Line','Splits','Posted At'],
+    [T_HISTORY]:  ['Account','Posting Date','Transaction Date','Description','Original Description','Parent Category','Category','Money In','Money Out','Fee','Line','Splits','Budget Date','Posted At'],
     [T_BUDGET]:   ['Line','Amount'],
     [T_RULES]:    ['Line','Type','Value'],
     [T_SETTINGS]: ['Key','Value'],
@@ -245,6 +245,8 @@
           return jsonOut_(updateHistoryLine_(body.hash, body.line));
         case 'update-splits':
           return jsonOut_(updateHistorySplits_(body.hash, body.splits || ''));
+        case 'update-budget-date':
+          return jsonOut_(updateHistoryBudgetDate_(body.hash, body.budgetDate || ''));
         case 'delete-history':
           return jsonOut_(deleteHistoryRow_(body.hash));
         case 'save-budget':
@@ -373,6 +375,18 @@
     const splitsCol = headers.indexOf('Splits');
     if (splitsCol < 0) return { ok: false, error: 'no Splits column — older sheet, reopen to migrate' };
     sheet.getRange(rowIdx, splitsCol + 1).setValue(splits || '');
+    return { ok: true };
+  }
+
+  // Budget Date overrides the cycle a row falls into for budgeting purposes,
+  // without changing its actual Posting Date. Empty string clears the override.
+  function updateHistoryBudgetDate_(hash, budgetDate) {
+    if (!hash) return { ok: false, error: 'hash required' };
+    const { sheet, rowIdx, headers } = findHistoryRowByHash_(hash);
+    if (rowIdx < 0) return { ok: false, error: 'row not found' };
+    const col = headers.indexOf('Budget Date');
+    if (col < 0) return { ok: false, error: 'no Budget Date column — older sheet, reopen to migrate' };
+    sheet.getRange(rowIdx, col + 1).setValue(budgetDate || '');
     return { ok: true };
   }
 
