@@ -216,10 +216,6 @@
     if (!checkToken_(params.token)) {
       return jsonOut_({ ok: false, error: 'bad token' });
     }
-    // Auto-migrate schema on every authenticated request — idempotent and cheap.
-    // Means new columns (e.g. Splits, Budget Date) appear without users having
-    // to physically reopen the Sheet to trigger onOpen.
-    try { migrateSchema_(); } catch (_) {}
     const action = params.action || 'load';
     try {
       if (action === 'load') return jsonOut_(loadAll_());
@@ -240,7 +236,6 @@
     if (!checkToken_(body.token)) {
       return jsonOut_({ ok: false, error: 'bad token' });
     }
-    try { migrateSchema_(); } catch (_) {}
 
     try {
       switch (body.action) {
@@ -426,6 +421,134 @@
   function overwriteSettings_(obj) {
     const rows = Object.keys(obj).map(k => ({ Key: k, Value: obj[k] }));
     return overwriteTab_(T_SETTINGS, rows);
+  }
+
+  // ============================================================================
+  // AI PDF PARSING (opt-in) — sends PDF statements to Google Gemini, returns
+  // structured transactions. Cost: free tier covers ~1500 PDFs/day. Privacy:
+  // the PDF bytes are sent to Google's Gemini API; nothing else.
+  //
+  // ENABLE:
+  //   1. Get a key from https://aistudio.google.com (free, ~30 seconds)
+  //   2. In the Apps Script editor: gear icon (Project Settings) → scroll
+  //      to "Script properties" → "Add script property":
+  //         Property: GEMINI_API_KEY
+  //         Value:    <your AIza... key>
+  //   3. Save & redeploy (Deploy → Manage deployments → ✏ → New version)
+  //   4. Run testPdfParse() from the editor to verify the parsing on a
+  //      recent PDF. Check View → Executions for the log output.
+  // ============================================================================
+  const GEMINI_MODEL = 'gemini-2.5-flash';
+
+  const GEMINI_PROMPT = [
+    'You are parsing a South African bank statement (typically Capitec) into structured transaction data.',
+    '',
+    'For each transaction row, extract:',
+    '- postingDate (YYYY-MM-DD)',
+    '- transactionDate (YYYY-MM-DD; same as posting date if not separately shown)',
+    '- description (the merchant or transaction description)',
+    '- originalDescription (raw description verbatim)',
+    '- moneyIn  (POSITIVE number for deposits/credits, 0 otherwise)',
+    '- moneyOut (NEGATIVE number for debits/spending, 0 otherwise)',
+    '- fee      (NEGATIVE number for fees, 0 otherwise)',
+    '- balance  (running balance after the transaction)',
+    '',
+    'Skip header rows, footer rows, page numbers, totals, summary lines, and anything that is not an actual transaction.',
+    '',
+    'CRITICAL: moneyOut and fee MUST be NEGATIVE numbers. A R100 debit appears as moneyOut: -100. A R5 fee appears as fee: -5. Positive moneyOut values break downstream budget math.',
+    '',
+    'Return a JSON array.',
+  ].join('\n');
+
+  const GEMINI_TX_SCHEMA = {
+    type: 'ARRAY',
+    items: {
+      type: 'OBJECT',
+      properties: {
+        postingDate:         { type: 'STRING' },
+        transactionDate:     { type: 'STRING' },
+        description:         { type: 'STRING' },
+        originalDescription: { type: 'STRING' },
+        moneyIn:             { type: 'NUMBER' },
+        moneyOut:            { type: 'NUMBER' },
+        fee:                 { type: 'NUMBER' },
+        balance:             { type: 'NUMBER' },
+      },
+      required: ['postingDate', 'description'],
+    },
+  };
+
+  function getGeminiKey_() {
+    const key = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
+    if (!key) throw new Error('No GEMINI_API_KEY in Script Properties. See the comment above this function for setup.');
+    return key;
+  }
+
+  function parseStatementPdf_(pdfBlob) {
+    const apiKey = getGeminiKey_();
+    const pdfBase64 = Utilities.base64Encode(pdfBlob.getBytes());
+
+    const body = {
+      contents: [{
+        parts: [
+          { inlineData: { mimeType: 'application/pdf', data: pdfBase64 } },
+          { text: GEMINI_PROMPT },
+        ],
+      }],
+      generationConfig: {
+        responseMimeType: 'application/json',
+        responseSchema: GEMINI_TX_SCHEMA,
+        temperature: 0.0,
+      },
+    };
+
+    const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + GEMINI_MODEL + ':generateContent?key=' + apiKey;
+    const res = UrlFetchApp.fetch(url, {
+      method: 'post',
+      contentType: 'application/json',
+      payload: JSON.stringify(body),
+      muteHttpExceptions: true,
+    });
+
+    const code = res.getResponseCode();
+    if (code !== 200) {
+      throw new Error('Gemini API error ' + code + ': ' + res.getContentText().slice(0, 500));
+    }
+    const data = JSON.parse(res.getContentText());
+    const cand = data.candidates && data.candidates[0];
+    const text = cand && cand.content && cand.content.parts && cand.content.parts[0] && cand.content.parts[0].text;
+    if (!text) throw new Error('Unexpected Gemini response shape: ' + JSON.stringify(data).slice(0, 500));
+    try {
+      return JSON.parse(text);
+    } catch (e) {
+      throw new Error('Gemini returned non-JSON: ' + text.slice(0, 500));
+    }
+  }
+
+  // Run from the editor (function dropdown → testPdfParse → ▶). Picks the
+  // most recent PDF in your Gmail and parses it, logging the result.
+  // No write to the Sheet — purely for verification.
+  function testPdfParse() {
+    const threads = GmailApp.search('from:me newer_than:90d has:attachment filename:pdf', 0, 5);
+    for (const thread of threads) {
+      for (const msg of thread.getMessages()) {
+        for (const att of msg.getAttachments()) {
+          const name = (att.getName() || '').toLowerCase();
+          if (!name.endsWith('.pdf')) continue;
+          Logger.log('Parsing: ' + att.getName() + ' (' + att.getSize() + ' bytes)');
+          try {
+            const txs = parseStatementPdf_(att);
+            Logger.log('Parsed ' + txs.length + ' transactions. First 5:');
+            Logger.log(JSON.stringify(txs.slice(0, 5), null, 2));
+            if (txs.length > 5) Logger.log('... and ' + (txs.length - 5) + ' more.');
+          } catch (e) {
+            Logger.log('FAILED: ' + e);
+          }
+          return; // first PDF only
+        }
+      }
+    }
+    Logger.log('No PDF attachments found in Gmail (from:me, last 90 days).');
   }
 
   // ============================================================================
