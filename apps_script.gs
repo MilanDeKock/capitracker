@@ -33,12 +33,12 @@
   // ============================================================================
   const SHARED_TOKEN = 'CHANGE-ME-TO-A-LONG-RANDOM-STRING';
   const BANK_EMAIL   = 'your-email@example.com';
-  // Note: Gmail's filename: operator silently fails on underscores ("account_statement"
-  // matches 0 emails even when those CSVs exist), and from:<literal-address> also
-  // misbehaves for self-sent mail. from:me + filename:csv is the combo that works.
-  // The per-attachment filter inside pullStatements_ narrows down to actual
-  // "account_statement_*.csv" files, so a broader Gmail query is safe.
-  const GMAIL_QUERY  = 'from:me newer_than:30d has:attachment filename:csv';
+  // Two senders to handle:
+  //   1. CSVs you email to yourself  → from:me
+  //   2. Capitec PDF statements sent directly by the bank → from:noreply@capitecbank.co.za
+  // Per-attachment filters inside pullStatements_ narrow down to actual
+  // statement files, so a broader Gmail query is safe.
+  const GMAIL_QUERY  = '(from:me OR from:noreply@capitecbank.co.za) newer_than:30d has:attachment';
 
   // ============================================================================
   // TAB DEFINITIONS
@@ -536,26 +536,51 @@
     }
   }
 
-  // Run from the editor (function dropdown → testPdfParse → ▶). Picks the
-  // most recent PDF in your Gmail and parses it, logging the result.
-  // No write to the Sheet — purely for verification.
-  function testPdfParse() {
-    const threads = GmailApp.search('from:me newer_than:90d has:attachment filename:pdf', 0, 5);
+  // List every PDF in your Gmail (last 90 days, from you OR Capitec) so
+  // you can see what testPdfParse() might pick up. Run when parsing's
+  // grabbing the wrong file.
+  function listGmailPdfs() {
+    const threads = GmailApp.search('(from:me OR from:noreply@capitecbank.co.za) newer_than:90d has:attachment', 0, 30);
+    let count = 0;
     for (const thread of threads) {
       for (const msg of thread.getMessages()) {
         for (const att of msg.getAttachments()) {
-          const name = (att.getName() || '').toLowerCase();
-          if (!name.endsWith('.pdf')) continue;
-          Logger.log('Parsing: ' + att.getName() + ' (' + att.getSize() + ' bytes)');
-          try {
-            const txs = parseStatementPdf_(att);
-            Logger.log('Parsed ' + txs.length + ' transactions. First 5:');
-            Logger.log(JSON.stringify(txs.slice(0, 5), null, 2));
-            if (txs.length > 5) Logger.log('... and ' + (txs.length - 5) + ' more.');
-          } catch (e) {
-            Logger.log('FAILED: ' + e);
+          const name = att.getName() || '';
+          if (!name.toLowerCase().endsWith('.pdf')) continue;
+          count++;
+          Logger.log(count + '. ' + name + ' (' + Math.round(att.getSize() / 1024) + 'KB, sent ' + msg.getDate().toISOString().slice(0, 10) + ')');
+        }
+      }
+    }
+    if (count === 0) Logger.log('No PDF attachments found (from:me, last 90d).');
+    else Logger.log('Total: ' + count + ' PDF(s)');
+  }
+
+  // Run from the editor (function dropdown → testPdfParse → ▶). Picks the
+  // most recent statement-looking PDF in your Gmail and parses it, logging
+  // the result. No write to the Sheet — purely for verification.
+  // Preference order: PDFs with "statement" or "capitec" in the name,
+  // then any PDF as a fallback.
+  function testPdfParse() {
+    const threads = GmailApp.search('(from:me OR from:noreply@capitecbank.co.za) newer_than:90d has:attachment', 0, 30);
+    for (const wantStatement of [true, false]) {
+      for (const thread of threads) {
+        for (const msg of thread.getMessages()) {
+          for (const att of msg.getAttachments()) {
+            const name = (att.getName() || '').toLowerCase();
+            if (!name.endsWith('.pdf')) continue;
+            if (wantStatement && !name.includes('statement') && !name.includes('capitec')) continue;
+            Logger.log('Parsing: ' + att.getName() + ' (' + Math.round(att.getSize() / 1024) + 'KB)');
+            try {
+              const txs = parseStatementPdf_(att);
+              Logger.log('Parsed ' + txs.length + ' transactions. First 5:');
+              Logger.log(JSON.stringify(txs.slice(0, 5), null, 2));
+              if (txs.length > 5) Logger.log('... and ' + (txs.length - 5) + ' more.');
+            } catch (e) {
+              Logger.log('FAILED: ' + e);
+            }
+            return; // first match only
           }
-          return; // first PDF only
         }
       }
     }
