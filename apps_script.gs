@@ -158,7 +158,14 @@
   // are already in your Sheet from previous syncs.
   const MAX_PDFS_PER_SYNC = 1;
 
-  function pullStatements_() {
+  // mode = 'all' | 'csv' | 'pdf' — controls which attachments get processed.
+  // CSV is fast; PDF goes through Gemini and can take minutes. Buttons in the
+  // app split these so users on one source aren't waiting for the other.
+  function pullStatements_(mode) {
+    mode = mode || 'all';
+    const includeCsv = (mode === 'all' || mode === 'csv');
+    const includePdf = (mode === 'all' || mode === 'pdf');
+
     const ss = SpreadsheetApp.getActiveSpreadsheet();
     const sheet = ss.getSheetByName(T_RAW);
     if (!sheet) return;
@@ -167,7 +174,7 @@
     const collected = [];
     const seenHashes = new Set();
     let csvCount = 0, pdfCount = 0, pdfTxCount = 0, pdfsParsed = 0;
-    const aiEnabled = !!PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
+    const aiEnabled = includePdf && !!PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
 
     for (const thread of threads) {
       for (const msg of thread.getMessages()) {
@@ -176,7 +183,7 @@
           if (att.isGoogleType && att.isGoogleType()) continue;
 
           // ---- CSV path (existing) ----
-          if (name.startsWith('account_statement') && name.endsWith('.csv')) {
+          if (includeCsv && name.startsWith('account_statement') && name.endsWith('.csv')) {
             csvCount++;
             let csv;
             try { csv = Utilities.parseCsv(att.getDataAsString()); }
@@ -265,7 +272,7 @@
     if (collected.length) {
       sheet.getRange(2, 1, collected.length, h.length).setValues(collected);
     }
-    Logger.log('Pulled ' + collected.length + ' rows. CSV files: ' + csvCount + ', PDF files: ' + pdfCount + ' (' + pdfTxCount + ' tx from AI parsing)' + (aiEnabled ? '' : ' [AI disabled — set GEMINI_API_KEY to parse PDFs]'));
+    Logger.log('Pulled ' + collected.length + ' rows [mode=' + mode + ']. CSV files: ' + csvCount + ', PDF files: ' + pdfCount + ' (' + pdfTxCount + ' tx from AI parsing)' + (includePdf && !aiEnabled ? ' [AI disabled — set GEMINI_API_KEY]' : ''));
   }
 
   // Decide whether a PDF looks like a bank statement worth sending to Gemini.
@@ -289,7 +296,9 @@
     const action = params.action || 'load';
     try {
       if (action === 'load') return jsonOut_(loadAll_());
-      if (action === 'pull') { pullStatements_(); return jsonOut_(loadAll_()); }
+      if (action === 'pull')     { pullStatements_('all'); return jsonOut_(loadAll_()); }
+      if (action === 'pull-csv') { pullStatements_('csv'); return jsonOut_(loadAll_()); }
+      if (action === 'pull-pdf') { pullStatements_('pdf'); return jsonOut_(loadAll_()); }
       if (action === 'ping') return jsonOut_({ ok: true, message: 'pong' });
       return jsonOut_({ ok: false, error: 'unknown action: ' + action });
     } catch (err) {
