@@ -263,8 +263,19 @@
     }
   }
 
+  // Prefer the token stored in Script Properties (encrypted, never in code).
+  // Falls back to the SHARED_TOKEN constant for backwards compatibility with
+  // existing setups. To migrate: open Project Settings → Script Properties,
+  // add SHARED_TOKEN = <your-token>, then optionally clear the constant above
+  // (set it back to 'CHANGE-ME-TO-A-LONG-RANDOM-STRING'). Rotate without
+  // redeploying — Property reads pick up the current value on each request.
+  function getSharedToken_() {
+    return PropertiesService.getScriptProperties().getProperty('SHARED_TOKEN') || SHARED_TOKEN;
+  }
+
   function checkToken_(t) {
-    return t && SHARED_TOKEN && t === SHARED_TOKEN;
+    const expected = getSharedToken_();
+    return t && expected && t === expected && expected !== 'CHANGE-ME-TO-A-LONG-RANDOM-STRING';
   }
 
   function jsonOut_(obj) {

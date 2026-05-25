@@ -190,7 +190,15 @@ function doPost(e) {
   } catch (err) { return jsonOut_({ ok: false, error: String(err) }); }
 }
 
-function checkToken_(t) { return t && SHARED_TOKEN && t === SHARED_TOKEN; }
+// Prefer Script Properties for the token (encrypted, easy to rotate).
+// Falls back to the SHARED_TOKEN constant above for setup simplicity.
+function getSharedToken_() {
+  return PropertiesService.getScriptProperties().getProperty('SHARED_TOKEN') || SHARED_TOKEN;
+}
+function checkToken_(t) {
+  const expected = getSharedToken_();
+  return t && expected && t === expected && expected !== '__TOKEN__';
+}
 function jsonOut_(obj)  { return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON); }
 
 function loadAll_() {
