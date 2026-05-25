@@ -152,6 +152,12 @@
   //   - PDF: account_statement.pdf etc. (sent directly by Capitec, parsed
   //          by Gemini if GEMINI_API_KEY is set in Script Properties)
   // ============================================================================
+  // How many PDF statements to parse per Sync. Each PDF costs ~2-3 minutes
+  // of Gemini time, and Apps Script web app calls cap at 6 minutes total.
+  // Parsing the newest one only is plenty for typical use — older statements
+  // are already in your Sheet from previous syncs.
+  const MAX_PDFS_PER_SYNC = 1;
+
   function pullStatements_() {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
     const sheet = ss.getSheetByName(T_RAW);
@@ -160,7 +166,7 @@
     const threads = GmailApp.search(GMAIL_QUERY, 0, 30);
     const collected = [];
     const seenHashes = new Set();
-    let csvCount = 0, pdfCount = 0, pdfTxCount = 0;
+    let csvCount = 0, pdfCount = 0, pdfTxCount = 0, pdfsParsed = 0;
     const aiEnabled = !!PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
 
     for (const thread of threads) {
@@ -204,6 +210,10 @@
           // ---- PDF path (AI-parsed) ----
           if (name.endsWith('.pdf') && aiEnabled && isBankStatementPdf_(att, msg)) {
             pdfCount++;
+            if (pdfsParsed >= MAX_PDFS_PER_SYNC) {
+              Logger.log('Skipping PDF (limit ' + MAX_PDFS_PER_SYNC + ' reached): ' + att.getName());
+              continue;
+            }
             Logger.log('Parsing PDF: ' + att.getName() + ' (' + Math.round(att.getSize() / 1024) + 'KB)');
             try {
               const txs = parseStatementPdf_(att);
@@ -234,6 +244,7 @@
                 collected.push(out);
                 pdfTxCount++;
               }
+              pdfsParsed++;
             } catch (e) {
               Logger.log('PDF parse failed for ' + name + ': ' + e);
             }
