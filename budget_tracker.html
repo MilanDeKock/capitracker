@@ -609,21 +609,26 @@ function BudgetTracker() {
     setChatMessages(nextMessages);
     setChatSending(true);
     try {
-      // Get the current window's txs the same way the Dashboard derives them,
-      // so the AI sees what the user is looking at right now. Falls back to
-      // all txs if no dashboard state.
-      const txs = allTxs.slice(0, 200).map(t => ({
+      // Default scope: the cycle window the user is currently viewing on the
+      // Dashboard. The AI is told this is the focus and will say "I only have
+      // current-cycle data" if asked about other periods (we don't ship the
+      // whole history every turn — that'd blow token budgets and slow things
+      // down).
+      const mapTx = t => ({
         date: t.date,
         description: t.description,
         amount: Math.round(t.amount * 100) / 100,
         line: t.line,
-      }));
+      });
+      const txs = windowTxs.slice(0, 300).map(mapTx);
       const res = await sheetFetch(config, null, {
         action: 'chat',
         messages: nextMessages.map(m => ({ role: m.role, text: m.text })),
         context: {
           budget,
           settings: { netIncome: settings.netIncome, anchorDay: settings.anchorDay },
+          windowFrom: dateRange.from,
+          windowTo: dateRange.to,
           transactions: txs,
         },
       });
