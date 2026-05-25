@@ -844,18 +844,44 @@ function Wizard() {
         </div>
 
         <div className="bg-indigo-50 border border-indigo-200 rounded-sm p-5 max-w-md mx-auto text-left mb-6">
-          <h3 className="text-xs uppercase tracking-wider text-indigo-700 mb-2">Optional: AI PDF parsing</h3>
-          <p className="text-sm text-stone-700 mb-3">
-            Capitec also emails monthly <strong>PDF statements</strong> directly. If you want those parsed automatically (no need to forward CSVs), enable Gemini AI:
+          <h3 className="text-xs uppercase tracking-wider text-indigo-700 mb-2">Optional power-ups (Script Properties)</h3>
+          <p className="text-xs text-stone-700 mb-3">
+            Your Apps Script has a built-in <strong>encrypted key-value store</strong> called Script Properties. Two things you can plug in there for extra power:
           </p>
-          <ol className="text-xs text-stone-700 space-y-1 pl-4 list-decimal">
-            <li>Get a free key at <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener" className="underline text-indigo-700">aistudio.google.com</a> (no card required)</li>
-            <li>In Apps Script editor → gear icon (Project Settings) → Script properties → add <code className="font-num bg-white px-1 text-[10px]">GEMINI_API_KEY</code> = your key</li>
-            <li>Save & redeploy. Sync Gmail now picks up PDFs too.</li>
+
+          <p className="text-xs text-stone-500 mb-2"><strong>How to open Script Properties:</strong></p>
+          <ol className="text-xs text-stone-700 space-y-1 pl-4 list-decimal mb-4">
+            <li>Apps Script editor → click the <strong>⚙️ gear icon</strong> in the left sidebar (Project Settings)</li>
+            <li>Scroll to the <strong>"Script properties"</strong> section</li>
+            <li>Click <strong>"Add script property"</strong>, enter the key + value, click <strong>Save script properties</strong></li>
           </ol>
-          <p className="text-xs text-stone-500 mt-3">
-            Free tier handles ~1500 statements/day. Your statement PDF bytes are sent to Google's Gemini API to be parsed; nothing else.
-          </p>
+
+          <div className="bg-white rounded-sm border border-indigo-100 p-3 mb-3">
+            <div className="text-xs font-medium text-indigo-800 mb-1">1. <code className="font-num bg-stone-100 px-1 text-[10px]">GEMINI_API_KEY</code> — AI PDF parsing for any SA bank</div>
+            <p className="text-xs text-stone-600 mb-2">
+              Skip CSV forwarding entirely. Capitec, FNB, Standard Bank, Nedbank, ABSA, etc. — Gemini AI extracts transactions directly from the PDF statement your bank emails you.
+            </p>
+            <ol className="text-xs text-stone-700 space-y-1 pl-4 list-decimal">
+              <li>Get a free key at <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener" className="underline text-indigo-700">aistudio.google.com</a> (no card required, ~30 sec)</li>
+              <li>Add Property <code className="font-num bg-stone-100 px-1 text-[10px]">GEMINI_API_KEY</code> = <em>your AIza… key</em></li>
+              <li>Save & redeploy. In CapiTracker, click <strong>Sync PDF (AI)</strong> instead of Sync CSV.</li>
+            </ol>
+            <p className="text-[11px] text-stone-500 mt-2">
+              Free tier covers ~1,500 PDFs/day. Your PDF bytes go to Google's Gemini API (no training, 30-day retention). Nothing else leaves your script.
+            </p>
+          </div>
+
+          <div className="bg-white rounded-sm border border-indigo-100 p-3">
+            <div className="text-xs font-medium text-indigo-800 mb-1">2. <code className="font-num bg-stone-100 px-1 text-[10px]">SHARED_TOKEN</code> — optional move from code to encrypted store</div>
+            <p className="text-xs text-stone-600 mb-2">
+              By default your token sits as a constant in the Apps Script code. You can move it to Script Properties for two wins: never visible if you share/screenshot the code, and rotatable without a full redeploy.
+            </p>
+            <ol className="text-xs text-stone-700 space-y-1 pl-4 list-decimal">
+              <li>Add Property <code className="font-num bg-stone-100 px-1 text-[10px]">SHARED_TOKEN</code> = <em>your current token</em></li>
+              <li>Optionally clear the <code className="font-num bg-stone-100 px-1 text-[10px]">SHARED_TOKEN = '…'</code> line in the code back to the placeholder string</li>
+              <li>That's it — the script picks up the Property automatically. No redeploy needed.</li>
+            </ol>
+          </div>
         </div>
 
         <div className="flex items-center justify-center gap-3">
