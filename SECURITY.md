@@ -26,3 +26,14 @@ I'll respond within a few days. If it's a real issue, I'll credit you in the fix
 ## Supported versions
 
 There's one version: the current `main` branch. No patched releases.
+
+## AI PDF parsing — data flow disclosure
+
+If you opt in to AI PDF parsing by setting a `GEMINI_API_KEY` in your Apps Script Properties:
+
+- Your PDF statement bytes are sent from your Apps Script to **Google's Gemini API** for parsing.
+- Per [Google's API data policy](https://ai.google.dev/gemini-api/terms): API inputs are **not used to train models**, and are retained for up to 30 days for abuse-prevention then deleted.
+- Your API key lives in **your own Apps Script Properties** (encrypted at rest by Google, never in this repo, never visible to the maintainer).
+- The feature is **fully opt-in**. If you don't set the key, no data is ever sent to any AI service. CSV-only users have zero AI exposure.
+
+If you don't want this trust relationship, **don't enable the feature** — CapiTracker works exactly as it did before. You can also revoke the API key at [aistudio.google.com](https://aistudio.google.com/app/apikey) at any time.

@@ -6,9 +6,11 @@
 
 ![Dashboard](demo/dashboard.png)
 
-A single-file budget tracker for South African bank statements. Reads CSVs you email to yourself, classifies them with simple rules, and shows you how the current pay cycle is tracking against your budget.
+A single-file budget tracker for South African bank statements. Reads CSVs you email to yourself (or PDF statements Capitec emails you directly, parsed by Gemini AI), classifies transactions with simple rules, and shows you how the current pay cycle is tracking against your budget.
 
 **Built specifically for Capitec CSVs** (main account + credit card). The rule-matching logic is generic, but the CSV ingest assumes Capitec's exact column layout (`Money In` / `Money Out` / `Fee` split, plus an auto-populated `Category` column). Other SA banks (FNB, Standard Bank, Nedbank, ABSA) use different column names and don't auto-categorise — adapting to them is a real porting job, not drop-in. PRs welcome.
+
+**Optional AI PDF parsing.** Capitec also emails monthly PDF statements directly. If you'd rather not forward CSVs every week, you can plug in a free Google Gemini API key and let AI extract transactions straight from the PDF — same Sheet, same rules, no CSV needed. See [Setup → AI PDF parsing](#optional-enable-ai-pdf-parsing).
 
 ## Why
 
@@ -58,7 +60,20 @@ Send `account_statement_*.csv` attachments to the **same Gmail address** that ow
 
 > **Gotcha:** if you have multiple Gmail accounts and forward the CSV from a different one (e.g. work → personal), the script won't find it. Either send from the same account, or edit `GMAIL_QUERY` in your `apps_script.gs` to use `to:me` instead.
 
-The Apps Script picks new attachments up on Sheet open, or whenever the app calls "Sync Gmail".
+The Apps Script picks new attachments up on Sheet open, or whenever the app calls **Sync CSV** (fast, ~5 sec).
+
+### Optional: enable AI PDF parsing
+
+If you'd rather skip the CSV-forwarding step entirely, Capitec emails monthly PDF statements directly. CapiTracker can have Google Gemini extract the transactions from those PDFs for you.
+
+1. Get a free key at [aistudio.google.com](https://aistudio.google.com/app/apikey) (~30 seconds, no card required, free tier handles ~1,500 PDFs/day).
+2. Apps Script editor → ⚙️ gear (Project Settings) → scroll to **Script properties** → click **Add script property**:
+   - Property: `GEMINI_API_KEY`
+   - Value: your `AIza...` key
+3. Save & redeploy.
+4. In CapiTracker, click the new **Sync PDF (AI)** button. Each PDF takes ~3 minutes to parse — go make a coffee ☕. Transactions appear when it's done.
+
+**You can switch between CSV and PDF flows at any time.** Pick whichever fits your routine. Many users find PDF mode less effort once it's set up (Capitec auto-emails the statement; you just hit Sync PDF when you remember).
 
 ## Features
 
@@ -81,6 +96,8 @@ The Apps Script picks new attachments up on Sheet open, or whenever the app call
 - **Split transactions across budget lines** — one bank transaction, multiple budget categories. e.g. a R3,000 savings transfer where R2,000 is real savings and R1,000 is a sinking fund. Works on any transaction from the moment it appears — no need to post to history first. Splits feed the dashboard's Budget vs Actual and the Running watch as if they were separate transactions.
 - **Move a transaction to a different cycle** — for late-reflecting payments or pre-payments. Click the small cycle pill on any row to remap which pay cycle the transaction counts in (previous / default / next). The actual Posting Date never changes — only which cycle it counts toward in your budget.
 - **Apply credits and income to budget lines** — got a R300 gift, refund, or reimbursement? Tag it to a budget line (e.g. "Eating Out") and it reduces that line's actual spend for the cycle. Useful for net-of-refund tracking and treating cash income as an offset to specific categories.
+- **AI PDF parsing (optional, opt-in)** — plug in a free Google Gemini API key and CapiTracker will extract transactions directly from Capitec's PDF statements. No more forwarding CSVs every week. Bring-your-own-key — the maintainer never sees your data or pays for your API calls.
+- **Two sync modes** — separate **Sync CSV** (fast, ~5 sec) and **Sync PDF (AI)** (slow, ~3 min) buttons so CSV users aren't waiting on AI they don't need.
 - **Dedup on import** — re-imports the same CSV without creating duplicate rows.
 - **Multi-account merge** — all your Capitec accounts (main, credit card, savings, etc.) feed into one ledger, with each row tagged by account.
 - **Private mode** — blur amounts with one click for screen-sharing.
@@ -144,6 +161,7 @@ They **cannot:**
 
 - **CDN supply chain.** The HTML loads React, ReactDOM, Babel, and PapaParse from public CDNs. Exact versions are pinned with **Subresource Integrity (SRI)** hashes — if a CDN swaps the file, your browser refuses to execute it. Tailwind's Play CDN serves dynamic CSS and can't be SRI'd, so that remains a small residual risk.
 - **Trust in the maintainer.** GitHub Pages serves whatever's on `main`. A compromised maintainer account could push hostile code. Mitigation: 2FA on the maintainer account. For zero-trust users: fork the repo, audit the code, host your own GitHub Pages.
+- **Gemini AI (only if you enable PDF parsing).** When you opt in, your PDF statement bytes are sent from your Apps Script to Google's Gemini API for parsing. Google's API data policy: no training on API inputs, 30-day abuse-prevention retention then deletion. Your API key lives in your own Apps Script Properties (encrypted by Google, never in the repo). If you don't set `GEMINI_API_KEY`, nothing gets sent to any AI service — the feature is fully opt-in. CSV-only users have zero AI exposure.
 
 ### Reporting a vulnerability
 
