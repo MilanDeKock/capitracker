@@ -83,10 +83,15 @@ If you'd rather skip the CSV-forwarding step entirely, Capitec emails monthly PD
 
 ![Budget configuration](demo/budget.png)
 
+- **Cashflow at a glance** — three-number dashboard card: **Bank balance** (sum of latest balance per account), **Outstanding** (still-to-leave-the-bank commitments for the cycle), **Free now** (what's actually free to spend). Expand for a per-account breakdown with staleness indicators (red if >14 days since last sync, amber if >7).
+- **Manual balance adjust** — bank statements lag real-time. Click the bank balance to override it with what your banking app says right now; revert any time with one click. Useful when your card has just been swiped and the statement hasn't caught up.
+- **Per-account "flip sign" toggle** — for non-Capitec accounts (some banks represent credit-card debt with the opposite convention). One ⇅ click per account fixes it; survives across syncs.
+- **Per-cycle budget overrides** — for one-off cycles (mission trip, holiday month, December). Set a different amount for a single cycle without touching your default budget. Effective budget = defaults + that cycle's overrides + any one-off lines.
 - **Running watch** — pick any budget line, see a live running total of spend against it for the current cycle, with red rows once you've gone over.
 
 ![Running watch](demo/running-watch.png)
 
+- **AI chat assistant (opt-in, Gemini)** — ask plain-English questions about your budget: "where did most of my money go this cycle?", "am I on track for groceries?", "what's left for eating out?". Scope selector (This cycle / Last 30 / Last 90 / All) controls how much history the model sees. Same Gemini key as PDF parsing — no extra setup.
 - **Rule-based classification** — match by description substring, exact category, or parent category. First match wins.
 
 ![Transactions classification](demo/transactions.png)
@@ -97,10 +102,11 @@ If you'd rather skip the CSV-forwarding step entirely, Capitec emails monthly PD
 - **Split transactions across budget lines** — one bank transaction, multiple budget categories. e.g. a R3,000 savings transfer where R2,000 is real savings and R1,000 is a sinking fund. Works on any transaction from the moment it appears — no need to post to history first. Splits feed the dashboard's Budget vs Actual and the Running watch as if they were separate transactions.
 - **Move a transaction to a different cycle** — for late-reflecting payments or pre-payments. Click the small cycle pill on any row to remap which pay cycle the transaction counts in (previous / default / next). The actual Posting Date never changes — only which cycle it counts toward in your budget.
 - **Apply credits and income to budget lines** — got a R300 gift, refund, or reimbursement? Tag it to a budget line (e.g. "Eating Out") and it reduces that line's actual spend for the cycle. Useful for net-of-refund tracking and treating cash income as an offset to specific categories.
-- **AI PDF parsing (optional, opt-in, any SA bank)** — plug in a free Google Gemini API key and CapiTracker extracts transactions directly from any major SA bank's PDF statement (Capitec, FNB, Standard Bank, Nedbank, ABSA, TymeBank, Investec, Discovery). No per-bank parser needed — AI handles layout differences. Bring-your-own-key; the maintainer never sees your data or pays for your API calls.
+- **AI PDF parsing (optional, opt-in, any SA bank)** — plug in a free Google Gemini API key and CapiTracker extracts transactions directly from any major SA bank's PDF statement (Capitec, FNB, Standard Bank, Nedbank, ABSA, TymeBank, Investec, Discovery). No per-bank parser needed — AI handles layout differences, and Gemini pulls the account number off the statement header so multi-account users see their accounts grouped correctly. Bring-your-own-key; the maintainer never sees your data or pays for your API calls.
 - **Two sync modes** — separate **Sync CSV** (fast, ~5 sec) and **Sync PDF (AI)** (slow, ~3 min) buttons so CSV users aren't waiting on AI they don't need.
 - **Dedup on import** — re-imports the same CSV without creating duplicate rows.
-- **Multi-account merge** — all your Capitec accounts (main, credit card, savings, etc.) feed into one ledger, with each row tagged by account.
+- **Multi-account merge** — all your accounts (main, credit card, savings, etc.) feed into one ledger, with each row tagged by account.
+- **Self-healing Sheet** — schema changes auto-create missing tabs and columns on the next sync. No manual sheet surgery when upgrading the script.
 - **Private mode** — blur amounts with one click for screen-sharing.
 - **No build step** — single HTML file, React via Babel-standalone, Tailwind via CDN.
 

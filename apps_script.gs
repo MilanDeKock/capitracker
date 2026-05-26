@@ -509,8 +509,15 @@
   }
 
   function overwriteTab_(name, rows) {
-    const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(name);
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    let sheet = ss.getSheetByName(name);
     const headers = HEADERS[name];
+    // Self-heal: if the tab doesn't exist (e.g. user hasn't reloaded the Sheet
+    // since a new tab was added in a script update), create it now.
+    if (!sheet) {
+      sheet = ss.insertSheet(name);
+      sheet.setFrozenRows(1);
+    }
     sheet.clearContents();
     sheet.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold');
     if (rows.length) {
