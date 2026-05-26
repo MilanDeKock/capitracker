@@ -71,6 +71,7 @@ const K = {
   tab:                 'bt.tab',                 // last selected tab
   privateMode:         'bt.privateMode',         // blur sensitive amounts (eye toggle)
   watchLine:           'bt.watchLine',           // which budget line the Running Watch panel is showing
+  balanceOverride:     'bt.balanceOverride',     // {amount, setAtMS} — manual current bank balance override
 };
 const loadLS = (k, fallback) => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fallback; } catch { return fallback; } };
 const saveLS = (k, v)        => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
@@ -312,6 +313,12 @@ function BudgetTracker() {
     return (cfg.sheetUrl && cfg.sheetToken) ? 'dashboard' : 'setup';
   });
   const [privateMode, setPrivateMode]     = useState(() => loadLS(K.privateMode, false));
+  // Manual override of the bank balance for the Cashflow card. Statements lag
+  // real life — Capitec emails today's PDF but transactions keep happening
+  // after that, so the bank's "Balance" column is already stale by the time
+  // you see it. User can tap in their actual current balance from the banking
+  // app; it stays applied until they click clear or sync newer data.
+  const [balanceOverride, setBalanceOverride] = useState(() => loadLS(K.balanceOverride, null));
   const [loading, setLoading]             = useState(false);
   const [syncStatus, setSyncStatus]       = useState(null); // {kind:'ok'|'err', message, when}
   const [importError, setImportError]     = useState(null);
@@ -326,6 +333,7 @@ function BudgetTracker() {
   useEffect(() => saveLS(K.budgetDateOverrides, budgetDateOverrides), [budgetDateOverrides]);
   useEffect(() => saveLS(K.tab, tab),             [tab]);
   useEffect(() => saveLS(K.privateMode, privateMode), [privateMode]);
+  useEffect(() => saveLS(K.balanceOverride, balanceOverride), [balanceOverride]);
 
   const cacheSnapshot = (next) => {
     saveLS(K.cache, {
@@ -898,6 +906,8 @@ function BudgetTracker() {
                                       setPrivateMode={setPrivateMode}
                                       rawStatements={rawStatements}
                                       onSaveSettings={handleSaveSettings}
+                                      balanceOverride={balanceOverride}
+                                      setBalanceOverride={setBalanceOverride}
                                     />}
         {tab === 'transactions' && <Transactions
                                       allTxs={allTxs}
@@ -1184,7 +1194,7 @@ function Field({ label, children }) {
 /* ============================================================================
    Dashboard
    ========================================================================== */
-function Dashboard({ budget: defaultBudget, budgetOverrides, effectiveBudgetForCycle, actuals, settings, dateRange, setDateRange, defaultRange, windowTxs, allCycles, cycleActuals, hasData, privateMode, setPrivateMode, rawStatements, onSaveSettings }) {
+function Dashboard({ budget: defaultBudget, budgetOverrides, effectiveBudgetForCycle, actuals, settings, dateRange, setDateRange, defaultRange, windowTxs, allCycles, cycleActuals, hasData, privateMode, setPrivateMode, rawStatements, onSaveSettings, balanceOverride, setBalanceOverride }) {
   if (!hasData) return <EmptyState />;
 
   // Resolve the budget for the currently-viewed cycle (defaults + any per-cycle
@@ -1235,7 +1245,15 @@ function Dashboard({ budget: defaultBudget, budgetOverrides, effectiveBudgetForC
     effective: isAccountInverted(b.account) ? -b.balance : b.balance,
   }));
 
-  const cashPosition = effectiveBalances.reduce((s, b) => s + b.effective, 0);
+  const computedCashPosition = effectiveBalances.reduce((s, b) => s + b.effective, 0);
+  // If the user manually adjusted their balance to reflect real-life lag,
+  // honour it. They can clear it any time.
+  const cashPosition = (balanceOverride && Number.isFinite(balanceOverride.amount))
+    ? balanceOverride.amount
+    : computedCashPosition;
+  const balanceIsAdjusted = !!(balanceOverride && Number.isFinite(balanceOverride.amount));
+  const [editingBalance, setEditingBalance] = useState(false);
+  const [balanceDraft, setBalanceDraft] = useState('');
 
   // Outstanding = future commitments still to leave the bank this cycle.
   // Overspend already came out of bank balance, so it's not added again here.
@@ -1316,9 +1334,57 @@ function Dashboard({ budget: defaultBudget, budgetOverrides, effectiveBudgetForC
           </div>
           <div className="grid grid-cols-3 gap-px bg-stone-200">
             <div className="bg-white px-5 py-4">
-              <div className="text-xs uppercase tracking-wider text-stone-500 mb-1">Bank balance</div>
-              <div className={`text-2xl font-num ${cashPosition < 0 ? 'text-red-700' : 'text-stone-900'} ${privateMode ? 'blur-sm select-none' : ''}`}>{fmt(cashPosition)}</div>
-              <div className="text-xs text-stone-500 mt-1">across {latestBalances.length} account{latestBalances.length === 1 ? '' : 's'}</div>
+              <div className="text-xs uppercase tracking-wider text-stone-500 mb-1 flex items-center justify-between gap-2">
+                <span>Bank balance{balanceIsAdjusted && <span className="ml-1.5 text-indigo-700 normal-case tracking-normal">· adjusted</span>}</span>
+                {!editingBalance && (
+                  <button onClick={() => { setBalanceDraft(String(cashPosition)); setEditingBalance(true); }}
+                          title="Adjust to your real-time bank balance (statement balance may lag actual)"
+                          className="text-[10px] uppercase tracking-wider text-stone-400 hover:text-stone-900">
+                    {balanceIsAdjusted ? 'edit' : 'adjust'}
+                  </button>
+                )}
+              </div>
+              {editingBalance ? (
+                <div className="flex items-center gap-1">
+                  <span className="text-stone-500">R</span>
+                  <input type="number" value={balanceDraft} onChange={e => setBalanceDraft(e.target.value)}
+                         onKeyDown={e => {
+                           if (e.key === 'Enter') {
+                             const n = parseFloat(balanceDraft);
+                             if (Number.isFinite(n)) setBalanceOverride({ amount: n, setAtMS: Date.now() });
+                             setEditingBalance(false);
+                           } else if (e.key === 'Escape') {
+                             setEditingBalance(false);
+                           }
+                         }}
+                         autoFocus
+                         className="px-2 py-1 border border-indigo-400 text-xl font-num w-32" />
+                  <button onClick={() => {
+                            const n = parseFloat(balanceDraft);
+                            if (Number.isFinite(n)) setBalanceOverride({ amount: n, setAtMS: Date.now() });
+                            setEditingBalance(false);
+                          }}
+                          className="text-[10px] uppercase tracking-wider px-2 py-1 border border-slate-800 bg-slate-800 text-white hover:bg-slate-700">
+                    Set
+                  </button>
+                  <button onClick={() => setEditingBalance(false)}
+                          className="text-[10px] uppercase tracking-wider px-2 py-1 text-stone-500 hover:text-stone-900">
+                    Cancel
+                  </button>
+                </div>
+              ) : (
+                <div className={`text-2xl font-num ${cashPosition < 0 ? 'text-red-700' : balanceIsAdjusted ? 'text-indigo-800' : 'text-stone-900'} ${privateMode ? 'blur-sm select-none' : ''}`}>{fmt(cashPosition)}</div>
+              )}
+              <div className="text-xs text-stone-500 mt-1 flex items-center gap-2 flex-wrap">
+                {balanceIsAdjusted ? (
+                  <>
+                    <span>manually set</span>
+                    <button onClick={() => setBalanceOverride(null)} className="text-stone-500 hover:text-red-700 underline">use {fmt(computedCashPosition)} from statement instead</button>
+                  </>
+                ) : (
+                  <span>across {latestBalances.length} account{latestBalances.length === 1 ? '' : 's'}</span>
+                )}
+              </div>
             </div>
             <div className="bg-white px-5 py-4">
               <div className="text-xs uppercase tracking-wider text-stone-500 mb-1">Outstanding</div>
