@@ -1401,14 +1401,25 @@ function Dashboard({ budget: defaultBudget, budgetOverrides, effectiveBudgetForC
           {cashflowExpanded && (
             <div className="px-5 py-4 border-t border-stone-200 space-y-5">
               <div>
-                <div className="text-xs uppercase tracking-wider text-stone-500 mb-2">Accounts</div>
+                <div className="text-xs uppercase tracking-wider text-stone-500 mb-2 flex items-center justify-between flex-wrap gap-2">
+                  <span>Accounts</span>
+                  <span className="normal-case tracking-normal text-stone-500 text-[11px]">Each account's balance is from its most recent synced transaction. Stale accounts get older as time passes — re-sync to refresh.</span>
+                </div>
                 <table className="w-full text-sm">
                   <tbody>
                     {effectiveBalances.map(b => {
                       const inv = isAccountInverted(b.account);
+                      const parsed = parseISO(b.date);
+                      const ageDays = parsed ? Math.floor((Date.now() - parsed.getTime()) / (1000 * 60 * 60 * 24)) : null;
+                      const staleClass = ageDays == null ? '' : ageDays > 14 ? 'text-red-700' : ageDays > 7 ? 'text-amber-700' : 'text-stone-500';
                       return (
                         <tr key={b.account} className="border-b border-stone-100">
-                          <td className="py-1.5 text-xs text-stone-700">{b.account}</td>
+                          <td className="py-1.5">
+                            <div className="text-xs text-stone-700">{b.account}</div>
+                            <div className={`text-[10px] ${staleClass}`}>
+                              as of {b.date || '—'}{ageDays != null && ageDays >= 1 ? ` (${ageDays}d ago)` : ageDays === 0 ? ' (today)' : ''}
+                            </div>
+                          </td>
                           <td className={`py-1.5 text-right font-num text-xs ${b.balance < 0 ? 'text-red-700' : ''} ${privateMode ? 'blur-sm select-none' : ''}`}>{fmt(b.balance)}</td>
                           <td className="py-1.5 text-right pr-2">
                             <button onClick={() => toggleAccountInverted(b.account)}
@@ -1427,6 +1438,14 @@ function Dashboard({ budget: defaultBudget, budgetOverrides, effectiveBudgetForC
                     </tr>
                   </tbody>
                 </table>
+                {effectiveBalances.some(b => {
+                  const p = parseISO(b.date); if (!p) return false;
+                  return Math.floor((Date.now() - p.getTime()) / 86400000) > 7;
+                }) && (
+                  <div className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 px-3 py-2 mt-2">
+                    One or more accounts haven't had a fresh statement in over a week. Email yourself a current statement for each stale account, then click <strong>Sync CSV</strong> or <strong>Sync PDF</strong> to refresh. Or use the <strong>adjust</strong> button on Bank balance for a manual override.
+                  </div>
+                )}
               </div>
 
               <div>
