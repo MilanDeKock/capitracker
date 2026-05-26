@@ -237,7 +237,7 @@
                 seenHashes.add(hash);
                 const out = HEADERS[T_RAW].map(h => {
                   if (h === 'Nr')                  return '';
-                  if (h === 'Account')             return '';
+                  if (h === 'Account')             return String(tx.accountNumber || '').trim();
                   if (h === 'Posting Date')        return tx.postingDate || '';
                   if (h === 'Transaction Date')    return tx.transactionDate || tx.postingDate || '';
                   if (h === 'Description')         return tx.description || '';
@@ -546,7 +546,10 @@
     'You are parsing a South African bank statement into structured transaction data.',
     'The statement could be from any SA bank — Capitec, FNB, Standard Bank, Nedbank, ABSA, TymeBank, Investec, Discovery, or similar. The layout, column headings, and terminology vary by bank; infer the structure from context.',
     '',
+    'BEFORE you list transactions, find the ACCOUNT NUMBER for this statement. It is on the first page or in a header/summary block, NOT inside the transaction rows themselves. Labels to look for: "Account number", "Account no.", "Acc no", "Card number", or similar. Capitec usually shows it near the top under the account holder name. Copy it as a string (digits only — strip spaces, dashes, label text). Every transaction object in your response should include this same accountNumber value.',
+    '',
     'For each transaction row, extract:',
+    '- accountNumber (the account-level number from the header — SAME value on every transaction in this response)',
     '- postingDate (YYYY-MM-DD)',
     '- transactionDate (YYYY-MM-DD; same as posting date if not separately shown)',
     '- description (the merchant or transaction description, cleaned up)',
@@ -562,6 +565,8 @@
     '',
     'CRITICAL: moneyOut and fee MUST be NEGATIVE numbers. A R100 debit appears as moneyOut: -100. A R5 fee appears as fee: -5. Positive moneyOut values break downstream budget math.',
     '',
+    'If you genuinely cannot find an account number in the statement, return accountNumber as an empty string — do not invent one.',
+    '',
     'Return a JSON array.',
   ].join('\n');
 
@@ -570,6 +575,7 @@
     items: {
       type: 'OBJECT',
       properties: {
+        accountNumber:       { type: 'STRING' },
         postingDate:         { type: 'STRING' },
         transactionDate:     { type: 'STRING' },
         description:         { type: 'STRING' },

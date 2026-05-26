@@ -171,7 +171,7 @@ function pullStatements_() {
               seen.add(hash);
               const out = HEADERS[T_RAW].map(h => {
                 if (h === 'Nr') return '';
-                if (h === 'Account') return '';
+                if (h === 'Account') return String(tx.accountNumber || '').trim();
                 if (h === 'Posting Date') return tx.postingDate || '';
                 if (h === 'Transaction Date') return tx.transactionDate || tx.postingDate || '';
                 if (h === 'Description') return tx.description || '';
@@ -402,7 +402,10 @@ const GEMINI_PROMPT = [
   'You are parsing a South African bank statement into structured transaction data.',
   'The statement could be from any SA bank — Capitec, FNB, Standard Bank, Nedbank, ABSA, TymeBank, Investec, Discovery, or similar. Layouts and terminology vary; infer the structure from context.',
   '',
+  'BEFORE listing transactions, find the ACCOUNT NUMBER for this statement (header/summary, not the transaction rows). Look for "Account number", "Account no.", "Acc no", "Card number". Strip spaces/dashes/labels; keep digits as a string. Every transaction object should include this same accountNumber value.',
+  '',
   'For each transaction row, extract:',
+  '- accountNumber (header-level account number; SAME on every row in this response)',
   '- postingDate (YYYY-MM-DD)',
   '- transactionDate (YYYY-MM-DD; same as posting date if not separately shown)',
   '- description (the merchant or transaction description, cleaned up)',
@@ -417,6 +420,8 @@ const GEMINI_PROMPT = [
   'Skip header rows, footer rows, page numbers, totals, summary lines, and anything that is not an actual transaction.',
   '',
   'CRITICAL: moneyOut and fee MUST be NEGATIVE numbers. A R100 debit appears as moneyOut: -100. A R5 fee appears as fee: -5. Positive moneyOut values break downstream budget math.',
+  '',
+  'If you cannot find an account number, return accountNumber as an empty string — do not invent one.',
   '',
   'Return a JSON array.',
 ].join('\n');
