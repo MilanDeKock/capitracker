@@ -295,6 +295,7 @@ function BudgetTracker() {
   const cached = loadLS(K.cache, {});
   const [config, setConfig]               = useState(() => loadLS(K.config, { sheetUrl: '', sheetToken: '' }));
   const [budget, setBudget]               = useState(cached.budget         || []);
+  const [budgetOverrides, setBudgetOverrides] = useState(cached.budgetOverrides || []);
   const [rules, setRules]                 = useState(cached.rules          || []);
   const [settings, setSettings]           = useState(cached.settings       || { netIncome: 0, anchorDay: 25 });
   const [rawStatements, setRawStatements] = useState(cached.rawStatements  || []);
@@ -328,11 +329,12 @@ function BudgetTracker() {
 
   const cacheSnapshot = (next) => {
     saveLS(K.cache, {
-      rawStatements: next.rawStatements ?? rawStatements,
-      history:       next.history       ?? history,
-      budget:        next.budget        ?? budget,
-      rules:         next.rules         ?? rules,
-      settings:      next.settings      ?? settings,
+      rawStatements:   next.rawStatements   ?? rawStatements,
+      history:         next.history         ?? history,
+      budget:          next.budget          ?? budget,
+      budgetOverrides: next.budgetOverrides ?? budgetOverrides,
+      rules:           next.rules           ?? rules,
+      settings:        next.settings        ?? settings,
     });
   };
 
@@ -355,6 +357,11 @@ function BudgetTracker() {
       const nRaw     = (data.rawStatements || []).map(normalizeRow).filter(t => t.date && t.amount !== 0);
       const nHist    = (data.transactions  || []).map(normalizeRow).filter(t => t.date);
       const nBudget  = (data.budget || []).map(r => ({ line: String(r.Line || ''), amount: Number(r.Amount) || 0 })).filter(b => b.line);
+      const nOverrides = (data.budgetOverrides || []).map(r => ({
+        cycle: String(r.Cycle || '').slice(0, 10),
+        line: String(r.Line || ''),
+        amount: Number(r.Amount) || 0,
+      })).filter(o => o.cycle && o.line);
       const nRules   = (data.rules  || []).map(r => ({ line: String(r.Line || ''), type: String(r.Type || ''), value: String(r.Value || '') })).filter(r => r.line && r.type);
       const s = data.settings || {};
       const invertedRaw = String(s['Inverted Accounts'] || '');
@@ -368,9 +375,10 @@ function BudgetTracker() {
       setRawStatements(nRaw);
       setHistory(nHist);
       setBudget(nBudget);
+      setBudgetOverrides(nOverrides);
       setRules(nRules);
       setSettings(nSettings);
-      saveLS(K.cache, { rawStatements: nRaw, history: nHist, budget: nBudget, rules: nRules, settings: nSettings });
+      saveLS(K.cache, { rawStatements: nRaw, history: nHist, budget: nBudget, budgetOverrides: nOverrides, rules: nRules, settings: nSettings });
       const sourceLabel = pullMode === 'csv' ? 'CSV statements'
                         : pullMode === 'pdf' ? 'PDF statements (AI-parsed)'
                         : pull ? 'Gmail' : null;
@@ -758,6 +766,41 @@ function BudgetTracker() {
     }
   }
 
+  async function handleSaveBudgetOverrides(newOverrides) {
+    const prev = budgetOverrides;
+    setBudgetOverrides(newOverrides);
+    try {
+      const rows = newOverrides.map(o => ({ Cycle: o.cycle, Line: o.line, Amount: o.amount }));
+      await sheetFetch(config, null, { action: 'save-budget-overrides', rows });
+      cacheSnapshot({ budgetOverrides: newOverrides });
+      setSyncStatus({ kind: 'ok', message: 'Overrides saved.', when: new Date() });
+    } catch (e) {
+      setBudgetOverrides(prev);
+      setSyncStatus({ kind: 'err', message: 'Overrides save failed: ' + (e.message || String(e)), when: new Date() });
+    }
+  }
+
+  // Merge default budget with per-cycle overrides for a given cycle key.
+  // Lines that exist only as overrides (e.g. one-off "Mission Trip") are
+  // appended at the end. Returns an array with the same shape as `budget`.
+  function effectiveBudgetForCycle(cycleStartISO) {
+    const overrideMap = {};
+    for (const o of budgetOverrides) {
+      if (o.cycle === cycleStartISO) overrideMap[o.line] = o.amount;
+    }
+    const result = budget.map(b => ({
+      line: b.line,
+      amount: overrideMap[b.line] !== undefined ? overrideMap[b.line] : b.amount,
+      overridden: overrideMap[b.line] !== undefined,
+    }));
+    for (const line of Object.keys(overrideMap)) {
+      if (!result.find(b => b.line === line)) {
+        result.push({ line, amount: overrideMap[line], overridden: true, addedOnly: true });
+      }
+    }
+    return result;
+  }
+
   async function handleSaveRules(newRules) {
     setLoading(true);
     setSyncStatus(null);
@@ -840,6 +883,8 @@ function BudgetTracker() {
       <main className="max-w-7xl mx-auto px-6 py-7">
         {tab === 'dashboard'    && <Dashboard
                                       budget={budget}
+                                      budgetOverrides={budgetOverrides}
+                                      effectiveBudgetForCycle={effectiveBudgetForCycle}
                                       actuals={actuals}
                                       settings={settings}
                                       dateRange={dateRange}
@@ -879,6 +924,9 @@ function BudgetTracker() {
                                     />}
         {tab === 'budget'       && <BudgetEditor
                                       budget={budget}
+                                      budgetOverrides={budgetOverrides}
+                                      onSaveOverrides={handleSaveBudgetOverrides}
+                                      anchorDay={settings.anchorDay}
                                       settings={settings}
                                       onSave={handleSaveBudget}
                                       saving={loading}
@@ -1136,8 +1184,18 @@ function Field({ label, children }) {
 /* ============================================================================
    Dashboard
    ========================================================================== */
-function Dashboard({ budget, actuals, settings, dateRange, setDateRange, defaultRange, windowTxs, allCycles, cycleActuals, hasData, privateMode, setPrivateMode, rawStatements, onSaveSettings }) {
+function Dashboard({ budget: defaultBudget, budgetOverrides, effectiveBudgetForCycle, actuals, settings, dateRange, setDateRange, defaultRange, windowTxs, allCycles, cycleActuals, hasData, privateMode, setPrivateMode, rawStatements, onSaveSettings }) {
   if (!hasData) return <EmptyState />;
+
+  // Resolve the budget for the currently-viewed cycle (defaults + any per-cycle
+  // overrides). All downstream computations and tables read from this `budget`,
+  // so overrides flow through to Budget vs Actual, Cashflow, Running watch, etc.
+  // without any other code needing to know about overrides.
+  const currentCycleKey = cycleKey(dateRange.from, settings.anchorDay);
+  const budget = effectiveBudgetForCycle
+    ? effectiveBudgetForCycle(currentCycleKey)
+    : defaultBudget;
+  const hasOverridesForCycle = budget.some(b => b.overridden);
 
   const stepCycle = (dir) => {
     const cur = parseISO(dateRange.from);
@@ -2010,13 +2068,23 @@ function RulesEditor({ rules, lineNames, onSave, saving }) {
 /* ============================================================================
    Budget editor (also handles net income + anchor day)
    ========================================================================== */
-function BudgetEditor({ budget, settings, onSave, saving }) {
+function BudgetEditor({ budget, budgetOverrides, onSaveOverrides, anchorDay, settings, onSave, saving }) {
   const [draftBudget, setDraftBudget]     = useState(budget);
   const [draftSettings, setDraftSettings] = useState(settings);
   const [newLine, setNewLine]             = useState('');
 
+  // Per-cycle overrides editor state
+  const today = toISO(new Date());
+  const currentCycleKey = cycleKey(today, anchorDay || 25);
+  const [selectedOverrideCycle, setSelectedOverrideCycle] = useState(currentCycleKey);
+  const [draftOverrides, setDraftOverrides] = useState(budgetOverrides || []);
+  const [newOverrideLine, setNewOverrideLine] = useState('');
+  const [newOverrideLineCustom, setNewOverrideLineCustom] = useState('');
+  const [newOverrideAmount, setNewOverrideAmount] = useState('');
+
   useEffect(() => setDraftBudget(budget),     [budget]);
   useEffect(() => setDraftSettings(settings), [settings]);
+  useEffect(() => setDraftOverrides(budgetOverrides || []), [budgetOverrides]);
 
   const dirty =
     JSON.stringify(draftBudget) !== JSON.stringify(budget) ||
@@ -2029,6 +2097,41 @@ function BudgetEditor({ budget, settings, onSave, saving }) {
 
   const total = draftBudget.reduce((s, b) => s + b.amount, 0);
   const surplus = draftSettings.netIncome - total;
+
+  // Cycle options for the override picker: 2 past, current, 2 future
+  const overrideCycleOptions = (() => {
+    const cycles = [];
+    for (let i = -2; i <= 2; i++) {
+      const k = shiftCycle(currentCycleKey, i);
+      if (k) cycles.push({
+        key: k,
+        label: prettyCycle(k, anchorDay || 25) + (i === 0 ? ' · current' : i < 0 ? ' · past' : ' · future'),
+      });
+    }
+    return cycles;
+  })();
+
+  const overridesForSelected = draftOverrides.filter(o => o.cycle === selectedOverrideCycle);
+  const overridesDirty = JSON.stringify(draftOverrides) !== JSON.stringify(budgetOverrides || []);
+
+  const updateOverride = (line, amount) =>
+    setDraftOverrides(draftOverrides.map(o =>
+      (o.cycle === selectedOverrideCycle && o.line === line) ? { ...o, amount } : o
+    ));
+  const removeOverride = (line) =>
+    setDraftOverrides(draftOverrides.filter(o => !(o.cycle === selectedOverrideCycle && o.line === line)));
+  const addOverride = () => {
+    const line = (newOverrideLineCustom.trim() || newOverrideLine).trim();
+    if (!line) return;
+    if (overridesForSelected.find(o => o.line === line)) return;
+    setDraftOverrides([...draftOverrides, {
+      cycle: selectedOverrideCycle, line, amount: parseFloat(newOverrideAmount) || 0,
+    }]);
+    setNewOverrideLine('');
+    setNewOverrideLineCustom('');
+    setNewOverrideAmount('');
+  };
+  const saveOverrides = () => onSaveOverrides && onSaveOverrides(draftOverrides);
 
   return (
     <div className="space-y-4">
@@ -2108,6 +2211,107 @@ function BudgetEditor({ budget, settings, onSave, saving }) {
             </tr>
           </tbody>
         </table>
+      </div>
+
+      {/* Per-cycle overrides — change a budget line just for one cycle, or
+          add one-off lines (e.g. Mission Trip) that only apply to a single cycle. */}
+      <div className="bg-white border border-stone-300 rounded-sm overflow-hidden">
+        <div className="px-5 py-3 border-b border-stone-200 flex items-center justify-between flex-wrap gap-2">
+          <div>
+            <h2 className="font-display text-lg">Per-cycle overrides</h2>
+            <div className="text-xs text-stone-500 mt-0.5">Tweak a budget line for one specific cycle without changing the default. Useful for one-offs like mission trips or holiday months.</div>
+          </div>
+          {overridesDirty && (
+            <button onClick={saveOverrides}
+                    className="px-3 py-1.5 text-xs uppercase tracking-wider font-medium border border-slate-800 bg-slate-800 text-white hover:bg-slate-700">
+              Save overrides
+            </button>
+          )}
+        </div>
+
+        <div className="px-5 py-4 space-y-4">
+          <div className="flex items-end gap-3 flex-wrap">
+            <div>
+              <label className="text-xs uppercase tracking-wider text-stone-500 block mb-1">Apply to cycle</label>
+              <select value={selectedOverrideCycle} onChange={e => setSelectedOverrideCycle(e.target.value)}
+                      className="px-2 py-1.5 border border-stone-300 text-sm bg-white">
+                {overrideCycleOptions.map(c => (
+                  <option key={c.key} value={c.key}>{c.label}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          {overridesForSelected.length > 0 ? (
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-xs uppercase tracking-wider text-stone-500 border-b border-stone-200">
+                  <th className="text-left py-2 font-medium">Line</th>
+                  <th className="text-right py-2 font-medium">Default</th>
+                  <th className="text-right py-2 font-medium">Override</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {overridesForSelected.map(o => {
+                  const def = draftBudget.find(b => b.line === o.line);
+                  return (
+                    <tr key={o.line} className="border-b border-stone-100">
+                      <td className="py-1.5 text-sm">
+                        {o.line}
+                        {!def && <span className="text-[10px] uppercase tracking-wider text-indigo-700 ml-1.5 px-1.5 py-0.5 border border-indigo-300 bg-indigo-50">one-off</span>}
+                      </td>
+                      <td className="py-1.5 text-right font-num text-stone-500 text-xs">{def ? fmt(def.amount) : '—'}</td>
+                      <td className="py-1.5 text-right">
+                        <input type="number" value={o.amount} onChange={e => updateOverride(o.line, parseFloat(e.target.value) || 0)}
+                               className="px-2 py-1 border border-stone-300 text-sm font-num w-28 text-right" />
+                      </td>
+                      <td className="py-1.5 text-right pr-1">
+                        <button onClick={() => removeOverride(o.line)} title="Remove override"
+                                className="text-stone-400 hover:text-red-700">
+                          <IconTrash className="w-3.5 h-3.5" />
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          ) : (
+            <div className="text-xs text-stone-500 italic">No overrides for this cycle. The default budget applies.</div>
+          )}
+
+          <div className="border-t border-stone-200 pt-3">
+            <div className="text-xs uppercase tracking-wider text-stone-500 mb-2">Add an override</div>
+            <div className="flex items-end gap-2 flex-wrap">
+              <div>
+                <label className="text-[10px] text-stone-500 block mb-0.5">Pick existing line</label>
+                <select value={newOverrideLine} onChange={e => { setNewOverrideLine(e.target.value); setNewOverrideLineCustom(''); }}
+                        className="px-2 py-1 border border-stone-300 text-sm bg-white">
+                  <option value="">— pick —</option>
+                  {draftBudget.map(b => <option key={b.line} value={b.line}>{b.line}</option>)}
+                </select>
+              </div>
+              <div className="text-xs text-stone-500 pb-1.5">or</div>
+              <div>
+                <label className="text-[10px] text-stone-500 block mb-0.5">Custom one-off line</label>
+                <input value={newOverrideLineCustom} onChange={e => { setNewOverrideLineCustom(e.target.value); setNewOverrideLine(''); }}
+                       placeholder="e.g. Mission Trip"
+                       className="px-2 py-1 border border-stone-300 text-sm" />
+              </div>
+              <div>
+                <label className="text-[10px] text-stone-500 block mb-0.5">Amount</label>
+                <input type="number" value={newOverrideAmount} onChange={e => setNewOverrideAmount(e.target.value)}
+                       placeholder="0"
+                       className="px-2 py-1 border border-stone-300 text-sm font-num w-24 text-right" />
+              </div>
+              <button onClick={addOverride}
+                      className="px-3 py-1 text-xs uppercase tracking-wider font-medium border border-slate-800 text-slate-800 hover:bg-slate-800 hover:text-stone-50 flex items-center gap-1.5">
+                <IconPlus className="w-3.5 h-3.5" />Add
+              </button>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );

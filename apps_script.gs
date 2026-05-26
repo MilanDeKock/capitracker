@@ -43,18 +43,20 @@
   // ============================================================================
   // TAB DEFINITIONS
   // ============================================================================
-  const T_RAW      = 'Bank Statement';
-  const T_HISTORY  = 'Transactions';
-  const T_BUDGET   = 'Budget';
-  const T_RULES    = 'Rules';
-  const T_SETTINGS = 'Settings';
+  const T_RAW       = 'Bank Statement';
+  const T_HISTORY   = 'Transactions';
+  const T_BUDGET    = 'Budget';
+  const T_OVERRIDES = 'Budget Overrides';  // per-cycle adjustments to budget lines
+  const T_RULES     = 'Rules';
+  const T_SETTINGS  = 'Settings';
 
   const HEADERS = {
-    [T_RAW]:      ['Nr','Account','Posting Date','Transaction Date','Description','Original Description','Parent Category','Category','Money In','Money Out','Fee','Balance'],
-    [T_HISTORY]:  ['Account','Posting Date','Transaction Date','Description','Original Description','Parent Category','Category','Money In','Money Out','Fee','Line','Splits','Budget Date','Posted At'],
-    [T_BUDGET]:   ['Line','Amount'],
-    [T_RULES]:    ['Line','Type','Value'],
-    [T_SETTINGS]: ['Key','Value'],
+    [T_RAW]:       ['Nr','Account','Posting Date','Transaction Date','Description','Original Description','Parent Category','Category','Money In','Money Out','Fee','Balance'],
+    [T_HISTORY]:   ['Account','Posting Date','Transaction Date','Description','Original Description','Parent Category','Category','Money In','Money Out','Fee','Line','Splits','Budget Date','Posted At'],
+    [T_BUDGET]:    ['Line','Amount'],
+    [T_OVERRIDES]: ['Cycle','Line','Amount'],
+    [T_RULES]:     ['Line','Type','Value'],
+    [T_SETTINGS]:  ['Key','Value'],
   };
 
   // ============================================================================
@@ -104,7 +106,7 @@
 
   function ensureTabs_() {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
-    for (const tabName of [T_RAW, T_HISTORY, T_BUDGET, T_RULES, T_SETTINGS]) {
+    for (const tabName of [T_RAW, T_HISTORY, T_BUDGET, T_OVERRIDES, T_RULES, T_SETTINGS]) {
       if (ss.getSheetByName(tabName)) continue;
       const sheet = ss.insertSheet(tabName);
       const h = HEADERS[tabName];
@@ -335,6 +337,8 @@
           return jsonOut_(deleteHistoryRow_(body.hash));
         case 'save-budget':
           return jsonOut_(overwriteTab_(T_BUDGET, body.rows || []));
+        case 'save-budget-overrides':
+          return jsonOut_(overwriteTab_(T_OVERRIDES, body.rows || []));
         case 'save-rules':
           return jsonOut_(overwriteTab_(T_RULES, body.rows || []));
         case 'save-settings':
@@ -376,11 +380,12 @@
   function loadAll_() {
     return {
       ok: true,
-      rawStatements: readTab_(T_RAW),
-      transactions:  readTab_(T_HISTORY),
-      budget:        readTab_(T_BUDGET),
-      rules:         readTab_(T_RULES),
-      settings:      readSettings_(),
+      rawStatements:    readTab_(T_RAW),
+      transactions:     readTab_(T_HISTORY),
+      budget:           readTab_(T_BUDGET),
+      budgetOverrides:  readTab_(T_OVERRIDES),
+      rules:            readTab_(T_RULES),
+      settings:         readSettings_(),
     };
   }
 
