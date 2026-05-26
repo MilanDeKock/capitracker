@@ -1272,6 +1272,11 @@ function Dashboard({ budget: defaultBudget, budgetOverrides, effectiveBudgetForC
   };
 
   const [cashflowExpanded, setCashflowExpanded] = useState(false);
+  // Cashflow only makes sense for the current cycle — Bank balance / Outstanding
+  // / Free now are inherently "right now" numbers. Hide when the user has
+  // navigated to a previous or future cycle so they don't misread historical
+  // budget remainders as current cash position.
+  const isCurrentCycle = dateRange.from === defaultRange.from && dateRange.to === defaultRange.to;
   // By-cycle table is collapsed by default — useful but noisy day-to-day.
   // Persist so the user's preference sticks across reloads.
   const [byCycleExpanded, _setByCycleExpanded] = useState(() => loadLS(K.byCycleExpanded, false));
@@ -1325,7 +1330,7 @@ function Dashboard({ budget: defaultBudget, budgetOverrides, effectiveBudgetForC
         </div>
       </div>
 
-      {latestBalances.length > 0 && (
+      {latestBalances.length > 0 && isCurrentCycle && (
         <div className="bg-white border border-stone-300 rounded-sm overflow-hidden">
           <div className="px-5 py-3 border-b border-stone-200 flex items-center justify-between flex-wrap gap-2">
             <div>
