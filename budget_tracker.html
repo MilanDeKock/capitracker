@@ -208,6 +208,7 @@ function normalizeRow(r) {
     moneyOut: mo,
     fee: fe,
     amount: mi + mo + fe,
+    balance: (r['Balance'] === '' || r['Balance'] == null) ? null : Number(r['Balance']),
     line: r['Line'] || null,
     splits: parseSplits(r['Splits']),
     budgetDate: (r['Budget Date'] ? String(r['Budget Date']).slice(0, 10) : '') || null,
@@ -356,9 +357,13 @@ function BudgetTracker() {
       const nBudget  = (data.budget || []).map(r => ({ line: String(r.Line || ''), amount: Number(r.Amount) || 0 })).filter(b => b.line);
       const nRules   = (data.rules  || []).map(r => ({ line: String(r.Line || ''), type: String(r.Type || ''), value: String(r.Value || '') })).filter(r => r.line && r.type);
       const s = data.settings || {};
+      const invertedRaw = String(s['Inverted Accounts'] || '');
       const nSettings = {
         netIncome: Number(s['Net Income']) || 0,
         anchorDay: Number(s['Anchor Day']) || 25,
+        // Account numbers whose balance sign should flip — for banks that
+        // represent credit-card debt with the opposite convention to Capitec.
+        invertedAccounts: invertedRaw.split(',').map(x => x.trim()).filter(Boolean),
       };
       setRawStatements(nRaw);
       setHistory(nHist);
@@ -563,7 +568,11 @@ function BudgetTracker() {
     try {
       const rows = newBudget.map(b => ({ Line: b.line, Amount: b.amount }));
       await sheetFetch(config, null, { action: 'save-budget', rows });
-      await sheetFetch(config, null, { action: 'save-settings', settings: { 'Net Income': newSettings.netIncome, 'Anchor Day': newSettings.anchorDay } });
+      await sheetFetch(config, null, { action: 'save-settings', settings: {
+        'Net Income': newSettings.netIncome,
+        'Anchor Day': newSettings.anchorDay,
+        'Inverted Accounts': (newSettings.invertedAccounts || []).join(','),
+      } });
       setBudget(newBudget);
       setSettings(newSettings);
       cacheSnapshot({ budget: newBudget, settings: newSettings });
@@ -731,6 +740,24 @@ function BudgetTracker() {
     }
   }
 
+  // Save just the settings (used by per-account "flip sign" toggles in Cashflow
+  // card so we don't need to re-save the whole budget for a one-line change).
+  async function handleSaveSettings(newSettings) {
+    const prev = settings;
+    setSettings(newSettings);
+    try {
+      await sheetFetch(config, null, { action: 'save-settings', settings: {
+        'Net Income': newSettings.netIncome,
+        'Anchor Day': newSettings.anchorDay,
+        'Inverted Accounts': (newSettings.invertedAccounts || []).join(','),
+      } });
+      cacheSnapshot({ settings: newSettings });
+    } catch (e) {
+      setSettings(prev);
+      setSyncStatus({ kind: 'err', message: 'Settings save failed: ' + (e.message || String(e)), when: new Date() });
+    }
+  }
+
   async function handleSaveRules(newRules) {
     setLoading(true);
     setSyncStatus(null);
@@ -824,6 +851,8 @@ function BudgetTracker() {
                                       hasData={allTxs.length > 0}
                                       privateMode={privateMode}
                                       setPrivateMode={setPrivateMode}
+                                      rawStatements={rawStatements}
+                                      onSaveSettings={handleSaveSettings}
                                     />}
         {tab === 'transactions' && <Transactions
                                       allTxs={allTxs}
@@ -1107,7 +1136,7 @@ function Field({ label, children }) {
 /* ============================================================================
    Dashboard
    ========================================================================== */
-function Dashboard({ budget, actuals, settings, dateRange, setDateRange, defaultRange, windowTxs, allCycles, cycleActuals, hasData, privateMode, setPrivateMode }) {
+function Dashboard({ budget, actuals, settings, dateRange, setDateRange, defaultRange, windowTxs, allCycles, cycleActuals, hasData, privateMode, setPrivateMode, rawStatements, onSaveSettings }) {
   if (!hasData) return <EmptyState />;
 
   const stepCycle = (dir) => {
@@ -1124,6 +1153,48 @@ function Dashboard({ budget, actuals, settings, dateRange, setDateRange, default
   const totalActual = budget.filter(b => b.line !== 'Reimbursable').reduce((s, b) => s + (actuals[b.line] || 0), 0);
   const gap         = settings.netIncome - totalActual;
   const budgetGap   = settings.netIncome - totalBudget;
+
+  // ===== Cashflow: latest balance per account + outstanding commitments =====
+  const invertedAccounts = (settings.invertedAccounts || []);
+  const isAccountInverted = (acc) => invertedAccounts.includes(acc);
+
+  // Group raw statement rows by account, keep the most recent (by date) for each.
+  // Sheet rows preserve a Balance column; history rows don't, so use rawStatements.
+  const latestBalances = useMemo(() => {
+    const result = {};
+    for (const r of (rawStatements || [])) {
+      if (r.balance === null || r.balance === undefined || !isFinite(r.balance)) continue;
+      const acc = r.account || '(unlabelled)';
+      if (!result[acc] || (r.date || '') > result[acc].date) {
+        result[acc] = { account: acc, balance: r.balance, date: r.date || '' };
+      }
+    }
+    return Object.values(result).sort((a, b) => a.account.localeCompare(b.account));
+  }, [rawStatements]);
+
+  const effectiveBalances = latestBalances.map(b => ({
+    ...b,
+    effective: isAccountInverted(b.account) ? -b.balance : b.balance,
+  }));
+
+  const cashPosition = effectiveBalances.reduce((s, b) => s + b.effective, 0);
+
+  // Outstanding = future commitments still to leave the bank this cycle.
+  // Overspend already came out of bank balance, so it's not added again here.
+  const outstandingCommitments = budget.reduce((s, b) => s + Math.max(0, b.amount - (actuals[b.line] || 0)), 0);
+
+  const freeToSpend = cashPosition - outstandingCommitments;
+
+  const latestSyncDate = latestBalances.reduce((d, b) => (b.date && b.date > d ? b.date : d), '');
+
+  const toggleAccountInverted = (acc) => {
+    const next = invertedAccounts.includes(acc)
+      ? invertedAccounts.filter(a => a !== acc)
+      : [...invertedAccounts, acc];
+    if (onSaveSettings) onSaveSettings({ ...settings, invertedAccounts: next });
+  };
+
+  const [cashflowExpanded, setCashflowExpanded] = useState(false);
 
   // Running watch — user picks any budget line; falls back gracefully if the
   // saved line no longer exists (e.g. user renamed/removed it).
@@ -1172,6 +1243,104 @@ function Dashboard({ budget, actuals, settings, dateRange, setDateRange, default
           </button>
         </div>
       </div>
+
+      {latestBalances.length > 0 && (
+        <div className="bg-white border border-stone-300 rounded-sm overflow-hidden">
+          <div className="px-5 py-3 border-b border-stone-200 flex items-center justify-between flex-wrap gap-2">
+            <div>
+              <h2 className="font-display text-lg">Cashflow</h2>
+              <div className="text-xs text-stone-500 mt-0.5">What's actually free to spend, after the bills still to leave the bank this cycle.</div>
+            </div>
+            <button onClick={() => setCashflowExpanded(!cashflowExpanded)}
+                    className="text-xs uppercase tracking-wider text-stone-500 hover:text-stone-900">
+              {cashflowExpanded ? 'collapse ▲' : 'breakdown ▼'}
+            </button>
+          </div>
+          <div className="grid grid-cols-3 gap-px bg-stone-200">
+            <div className="bg-white px-5 py-4">
+              <div className="text-xs uppercase tracking-wider text-stone-500 mb-1">Bank balance</div>
+              <div className={`text-2xl font-num ${cashPosition < 0 ? 'text-red-700' : 'text-stone-900'} ${privateMode ? 'blur-sm select-none' : ''}`}>{fmt(cashPosition)}</div>
+              <div className="text-xs text-stone-500 mt-1">across {latestBalances.length} account{latestBalances.length === 1 ? '' : 's'}</div>
+            </div>
+            <div className="bg-white px-5 py-4">
+              <div className="text-xs uppercase tracking-wider text-stone-500 mb-1">Outstanding</div>
+              <div className={`text-2xl font-num text-stone-700 ${privateMode ? 'blur-sm select-none' : ''}`}>−{fmt(outstandingCommitments)}</div>
+              <div className="text-xs text-stone-500 mt-1">budgeted but unspent</div>
+            </div>
+            <div className="bg-white px-5 py-4">
+              <div className="text-xs uppercase tracking-wider text-stone-500 mb-1">Free now</div>
+              <div className={`text-2xl font-num ${freeToSpend < 0 ? 'text-red-700' : 'text-emerald-700'} ${privateMode ? 'blur-sm select-none' : ''}`}>{fmt(freeToSpend)}</div>
+              <div className="text-xs text-stone-500 mt-1">cash minus commitments</div>
+            </div>
+          </div>
+
+          {cashflowExpanded && (
+            <div className="px-5 py-4 border-t border-stone-200 space-y-5">
+              <div>
+                <div className="text-xs uppercase tracking-wider text-stone-500 mb-2">Accounts</div>
+                <table className="w-full text-sm">
+                  <tbody>
+                    {effectiveBalances.map(b => {
+                      const inv = isAccountInverted(b.account);
+                      return (
+                        <tr key={b.account} className="border-b border-stone-100">
+                          <td className="py-1.5 text-xs text-stone-700">{b.account}</td>
+                          <td className={`py-1.5 text-right font-num text-xs ${b.balance < 0 ? 'text-red-700' : ''} ${privateMode ? 'blur-sm select-none' : ''}`}>{fmt(b.balance)}</td>
+                          <td className="py-1.5 text-right pr-2">
+                            <button onClick={() => toggleAccountInverted(b.account)}
+                                    title={inv ? 'Sign inverted — click to revert' : 'Flip sign for this account. Use if your bank represents credit-card debt with the opposite convention.'}
+                                    className={`text-[10px] uppercase tracking-wider px-1.5 py-0.5 border ${inv ? 'border-indigo-300 bg-indigo-50 text-indigo-800' : 'border-stone-300 text-stone-500 hover:bg-stone-100'}`}>
+                              {inv ? '⇅ inverted' : '⇅ flip'}
+                            </button>
+                          </td>
+                          <td className={`py-1.5 text-right font-num font-medium ${b.effective < 0 ? 'text-red-700' : ''} ${privateMode ? 'blur-sm select-none' : ''}`}>{fmt(b.effective)}</td>
+                        </tr>
+                      );
+                    })}
+                    <tr className="font-medium bg-stone-50">
+                      <td className="py-2 pl-1">Cash position</td><td></td><td></td>
+                      <td className={`py-2 text-right font-num ${cashPosition < 0 ? 'text-red-700' : ''} ${privateMode ? 'blur-sm select-none' : ''}`}>{fmt(cashPosition)}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <div>
+                <div className="text-xs uppercase tracking-wider text-stone-500 mb-2">Outstanding by budget line</div>
+                <table className="w-full text-sm">
+                  <tbody>
+                    {budget.map(b => {
+                      const act = actuals[b.line] || 0;
+                      const remaining = b.amount - act;
+                      if (b.amount === 0 && act === 0) return null;
+                      return (
+                        <tr key={b.line} className="border-b border-stone-100 text-xs">
+                          <td className="py-1.5 text-stone-700">{b.line}</td>
+                          <td className={`py-1.5 text-right font-num text-stone-500 ${privateMode ? 'blur-sm select-none' : ''}`}>R{b.amount.toLocaleString('en-ZA')} budget</td>
+                          <td className={`py-1.5 text-right font-num text-stone-500 ${privateMode ? 'blur-sm select-none' : ''}`}>{fmt(act)} spent</td>
+                          <td className={`py-1.5 text-right font-num font-medium ${remaining < 0 ? 'text-red-700' : remaining > 0 ? 'text-stone-900' : 'text-stone-500'} ${privateMode ? 'blur-sm select-none' : ''}`}>
+                            {remaining > 0 ? `${fmt(remaining)} still due` : remaining < 0 ? `${fmt(Math.abs(remaining))} over` : '—'}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                    <tr className="font-medium bg-stone-50 text-xs">
+                      <td className="py-2 pl-1">Total outstanding (under-budget lines only)</td><td></td><td></td>
+                      <td className={`py-2 text-right font-num ${privateMode ? 'blur-sm select-none' : ''}`}>{fmt(outstandingCommitments)}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              {latestSyncDate && (
+                <div className="text-[11px] text-stone-500 italic">
+                  Balances as of {latestSyncDate}. Hit <strong>Sync CSV</strong> or <strong>Sync PDF</strong> for fresh data.
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <KPI label="Net income"            value={settings.netIncome} tone="neutral"                                                              blurred={privateMode} />
