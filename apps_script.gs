@@ -553,7 +553,7 @@
     'You are parsing a South African bank statement into structured transaction data.',
     'The statement could be from any SA bank — Capitec, FNB, Standard Bank, Nedbank, ABSA, TymeBank, Investec, Discovery, or similar. The layout, column headings, and terminology vary by bank; infer the structure from context.',
     '',
-    'BEFORE you list transactions, find the ACCOUNT NUMBER for this statement. It is on the first page or in a header/summary block, NOT inside the transaction rows themselves. Labels to look for: "Account number", "Account no.", "Acc no", "Card number", or similar. Capitec usually shows it near the top under the account holder name. Copy it as a string (digits only — strip spaces, dashes, label text). Every transaction object in your response should include this same accountNumber value.',
+    'BEFORE you list transactions, find the ACCOUNT NUMBER for this statement. It is on the first page or in a header/summary block, NOT inside the transaction rows themselves. Labels to look for: "Account number", "Account:", "Account no.", "Acc no", "Card number", or similar. Capitec usually shows it near the top under the account holder name. Copy it as a string (digits only — strip spaces, dashes, label text). Every transaction object in your response should include this same accountNumber value.',
     '',
     'For each transaction row, extract:',
     '- accountNumber (the account-level number from the header — SAME value on every transaction in this response)',
