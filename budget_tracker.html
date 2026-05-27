@@ -534,7 +534,17 @@ function BudgetTracker() {
     return result;
   }, [allTxs, allCycles, settings.anchorDay]);
 
-  const lineNames           = budget.map(b => b.line);
+  // Default budget lines + any one-off lines added via per-cycle overrides.
+  // Lets users tag transactions to temp lines (e.g. "Mission Trip") that
+  // only exist in a single cycle. Order: defaults first, overrides appended.
+  const lineNames = useMemo(() => {
+    const seen = new Set(budget.map(b => b.line));
+    const extra = [];
+    for (const o of budgetOverrides) {
+      if (o.line && !seen.has(o.line)) { seen.add(o.line); extra.push(o.line); }
+    }
+    return [...budget.map(b => b.line), ...extra];
+  }, [budget, budgetOverrides]);
   const newTxs              = allTxs.filter(t => !t.inHistory);
   // A row counts as classified if either its Line is set (not "Review") OR it
   // has splits configured — splits override the single line for budgeting,
