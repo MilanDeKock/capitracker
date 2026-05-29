@@ -243,7 +243,11 @@ function denormalizeRow(t) {
 // purchase imported twice — once pending, once posted — would dedup as
 // two separate rows.
 const normalizeDesc = s => String(s || '').toLowerCase().replace(/^\s*\(pending\)\s*/i, '').trim();
-const txHash = t => `${t.date}|${normalizeDesc(t.originalDesc || t.description)}|${(t.amount || 0).toFixed(2)}`;
+// Anchor the hash on Transaction Date — it's stable across pending → cleared.
+// Capitec shifts Posting Date when a pending row clears, but Transaction Date
+// stays put, so hashing by Transaction Date keeps the same purchase looking
+// like the same purchase regardless of clearance status.
+const txHash = t => `${t.transactionDate || t.date}|${normalizeDesc(t.originalDesc || t.description)}|${(t.amount || 0).toFixed(2)}`;
 
 /* ============================================================================
    Classifier
