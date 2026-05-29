@@ -492,12 +492,22 @@
     return { ok: true };
   }
 
+  // Deletes ALL rows matching the hash, not just the first. Hash collapses
+  // "(Pending) X" and "X" to the same value, so a sheet that accumulated
+  // both copies pre-fix has two rows for one logical transaction — the
+  // user expects one delete click to remove the whole thing.
   function deleteHistoryRow_(hash) {
     if (!hash) return { ok: false, error: 'hash required' };
-    const { sheet, rowIdx } = findHistoryRowByHash_(hash);
-    if (rowIdx < 0) return { ok: false, error: 'row not found' };
-    sheet.deleteRow(rowIdx);
-    return { ok: true };
+    let deleted = 0;
+    while (true) {
+      const { sheet, rowIdx } = findHistoryRowByHash_(hash);
+      if (rowIdx < 0) break;
+      sheet.deleteRow(rowIdx);
+      deleted++;
+      if (deleted > 50) break; // safety: don't loop forever on weird data
+    }
+    if (deleted === 0) return { ok: false, error: 'row not found' };
+    return { ok: true, deleted };
   }
 
   // Strip transient bank markers (e.g. Capitec's "(Pending)" prefix on
