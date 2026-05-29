@@ -204,7 +204,7 @@
                 if (idx[h] === undefined) return '';
                 return row[idx[h]];
               });
-              const desc = (row[idx['Original Description']] || row[idx['Description']] || '').toString().toLowerCase();
+              const desc = normalizeDesc_(row[idx['Original Description']] || row[idx['Description']]);
               const mi = Number(row[idx['Money In']]) || 0;
               const mo = Number(row[idx['Money Out']]) || 0;
               const fe = Number(row[idx['Fee']]) || 0;
@@ -231,7 +231,7 @@
                 const mi = Number(tx.moneyIn) || 0;
                 const mo = Number(tx.moneyOut) || 0;
                 const fe = Number(tx.fee) || 0;
-                const desc = (tx.originalDescription || tx.description || '').toString().toLowerCase();
+                const desc = normalizeDesc_(tx.originalDescription || tx.description);
                 const hash = tx.postingDate + '|' + desc + '|' + (mi + mo + fe).toFixed(2);
                 if (seenHashes.has(hash)) continue;
                 seenHashes.add(hash);
@@ -500,11 +500,18 @@
     return { ok: true };
   }
 
+  // Strip transient bank markers (e.g. Capitec's "(Pending)" prefix on
+  // un-cleared rows) so the same transaction hashes the same whether it
+  // was imported as pending or after it cleared.
+  function normalizeDesc_(s) {
+    return String(s || '').toLowerCase().replace(/^\s*\(pending\)\s*/i, '').trim();
+  }
+
   function hashRow_(r) {
     const mi = Number(r['Money In']) || 0;
     const mo = Number(r['Money Out']) || 0;
     const fe = Number(r['Fee']) || 0;
-    const desc = (r['Original Description'] || r['Description'] || '').toString().toLowerCase();
+    const desc = normalizeDesc_(r['Original Description'] || r['Description']);
     return [r['Posting Date'], desc, (mi + mo + fe).toFixed(2)].join('|');
   }
 
