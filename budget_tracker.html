@@ -783,6 +783,11 @@ function BudgetTracker() {
         console.log('[merge] loser is not in history — added hash to hiddenHashes only');
       }
 
+      // Blow away the localStorage snapshot cache so the upcoming
+      // loadFromSheet definitely overwrites it with fresh server data —
+      // not stitches stale cache on top. Keeps bt.config (URL + token)
+      // and other settings keys intact; we only nuke the data cache.
+      try { localStorage.removeItem(K.cache); } catch (_) {}
       console.log('[merge] reloading sheet…');
       await loadFromSheet();
       console.log('[merge] done');
