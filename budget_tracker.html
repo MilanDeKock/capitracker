@@ -73,6 +73,7 @@ const K = {
   watchLine:           'bt.watchLine',           // which budget line the Running Watch panel is showing
   balanceOverride:     'bt.balanceOverride',     // {amount, setAtMS} — manual current bank balance override
   byCycleExpanded:     'bt.byCycleExpanded',     // dashboard "By cycle" table collapsed/expanded
+  hiddenHashes:        'bt.hiddenHashes',        // [hash, ...] — Bank Statement rows the user merged away locally
 };
 const loadLS = (k, fallback) => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fallback; } catch { return fallback; } };
 const saveLS = (k, v)        => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
@@ -330,6 +331,18 @@ function BudgetTracker() {
   // you see it. User can tap in their actual current balance from the banking
   // app; it stays applied until they click clear or sync newer data.
   const [balanceOverride, setBalanceOverride] = useState(() => loadLS(K.balanceOverride, null));
+  // Hashes of Bank Statement rows the user has "merged away" — they're
+  // suppressed from the dashboard / Transactions view so they don't
+  // double-count against the budget. Stored as an array of hashes in
+  // localStorage so it survives reloads. The raw row itself stays in the
+  // Sheet (Bank Statement gets rebuilt on every sync anyway), so if the
+  // user wants the row back they can clear bt.hiddenHashes.
+  const [hiddenHashes, _setHiddenHashes] = useState(() => new Set(loadLS(K.hiddenHashes, [])));
+  const addHiddenHash = (h) => _setHiddenHashes(prev => {
+    const next = new Set(prev); next.add(h);
+    saveLS(K.hiddenHashes, Array.from(next));
+    return next;
+  });
   const [loading, setLoading]             = useState(false);
   const [syncStatus, setSyncStatus]       = useState(null); // {kind:'ok'|'err', message, when}
   // Pending-merge review modal: null when closed, otherwise an array of
@@ -462,6 +475,7 @@ function BudgetTracker() {
       if (isInternalTx(t)) continue;
       const h = txHash(t);
       if (seen.has(h)) continue;
+      if (hiddenHashes.has(h)) continue;  // user merged this away locally
       seen.add(h);
       const auto = classify(t, rules);
       const line = overrides[h] || auto;
@@ -471,7 +485,7 @@ function BudgetTracker() {
     }
     out.sort((a, b) => b.date.localeCompare(a.date));
     return out;
-  }, [history, rawStatements, csvRows, rules, overrides, splitOverrides, budgetDateOverrides]);
+  }, [history, rawStatements, csvRows, rules, overrides, splitOverrides, budgetDateOverrides, hiddenHashes]);
 
   // Default date range — current cycle
   const defaultRange = useMemo(() => {
@@ -709,11 +723,13 @@ function BudgetTracker() {
     )) return;
 
     try {
-      // Step 1: if loser has a meaningful Line and winner doesn't, transfer it.
+      // Step 1: if loser has a meaningful Line and winner doesn't, transfer
+      // it. Only matters when winner is in history (raw rows pick up Line
+      // via auto-classify, so they don't need a server update).
       const loserLine  = (loser.line  || '').trim();
       const winnerLine = (winner.line || '').trim();
       const winnerIsUnclassified = !winnerLine || winnerLine.toLowerCase() === 'review';
-      if (loserLine && loserLine.toLowerCase() !== 'review' && winnerIsUnclassified) {
+      if (winner.inHistory && loserLine && loserLine.toLowerCase() !== 'review' && winnerIsUnclassified) {
         await sheetFetch(config, null, {
           action: 'update-history',
           hash: winner.hash,
@@ -721,20 +737,30 @@ function BudgetTracker() {
         });
       }
 
-      // Step 2: delete the loser using the field-based delete that's known
-      // to work even when hashes drift.
-      await sheetFetch(config, null, {
-        action: 'delete-history',
-        hash: loser.hash,
-        match: {
-          postingDate:         loser.date,
-          originalDescription: loser.originalDesc || loser.description,
-          description:         loser.description,
-          amount:              loser.amount,
-        },
-      });
+      // Step 2: get rid of the loser. Different paths depending on where
+      // the loser lives:
+      //   - in history (Transactions tab): real server-side delete
+      //   - in Bank Statement only (not yet posted): hide locally. We can't
+      //     delete it from the Sheet because the next sync would just bring
+      //     it back. Hiding via localStorage keeps it out of the merged
+      //     view, so it stops double-counting against the budget.
+      if (loser.inHistory) {
+        await sheetFetch(config, null, {
+          action: 'delete-history',
+          hash: loser.hash,
+          match: {
+            postingDate:         loser.date,
+            originalDescription: loser.originalDesc || loser.description,
+            description:         loser.description,
+            amount:              loser.amount,
+          },
+        });
+        setSyncStatus({ kind: 'ok', message: 'Merged — removed ' + (loser.description || loser.originalDesc) + ' from history.', when: new Date() });
+      } else {
+        addHiddenHash(loser.hash);
+        setSyncStatus({ kind: 'ok', message: 'Merged — hid the duplicate from view (Bank Statement row).', when: new Date() });
+      }
 
-      setSyncStatus({ kind: 'ok', message: 'Merged — kept ' + (winner.description || winner.originalDesc), when: new Date() });
       await loadFromSheet();
     } catch (e) {
       setSyncStatus({ kind: 'err', message: 'Merge failed: ' + (e.message || String(e)), when: new Date() });
@@ -1832,16 +1858,14 @@ function Transactions({ allTxs, lineNames, overrides, setOverride, clearOverride
     [allTxs, selected]
   );
 
-  // "Merge selected" eligibility: exactly two selected rows in history with
-  // the same amount. We don't require one to be tagged (Pending) — Capitec
-  // sometimes drops that prefix when the row clears, leaving the user with
-  // two cleared-looking rows that are still the same purchase. The server's
-  // merge logic figures out which is older and which is newer.
+  // "Merge selected" eligibility: any two rows with matching amounts.
+  // They can be both in history, both still in Bank Statement (unposted),
+  // or one of each — the merge handler chooses the right action per side
+  // (delete from history, or hide the raw row locally).
   const mergePair = useMemo(() => {
     if (selected.size !== 2) return null;
     const picks = allTxs.filter(t => selected.has(t.hash));
     if (picks.length !== 2) return null;
-    if (!picks.every(t => t.inHistory)) return null;
     if ((picks[0].amount || 0).toFixed(2) !== (picks[1].amount || 0).toFixed(2)) return null;
     return picks;
   }, [selected, allTxs]);
