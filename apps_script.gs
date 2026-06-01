@@ -383,7 +383,15 @@
 
     function checkToken_(t) {
       const expected = getSharedToken_();
-      return t && expected && t === expected && expected !== 'CHANGE-ME-TO-A-LONG-RANDOM-STRING';
+      const ok = t && expected && t === expected && expected !== 'CHANGE-ME-TO-A-LONG-RANDOM-STRING';
+      if (!ok) {
+        // Diagnostic: shows up in Executions log so we can see WHY the
+        // token mismatched without ever printing either value in full.
+        Logger.log('checkToken_ FAIL — got: ' + (t ? '"' + String(t).slice(0, 3) + '…' + String(t).slice(-3) + '" (len ' + String(t).length + ')' : '(empty)')
+          + ', expected: ' + (expected ? '"' + String(expected).slice(0, 3) + '…' + String(expected).slice(-3) + '" (len ' + String(expected).length + ')' : '(empty)')
+          + ', placeholder?: ' + (expected === 'CHANGE-ME-TO-A-LONG-RANDOM-STRING'));
+      }
+      return ok;
     }
 
     function jsonOut_(obj) {
