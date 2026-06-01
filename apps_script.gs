@@ -799,16 +799,27 @@
       };
       const matchRow = (target) => {
         const tDate = String(target.postingDate || '');
-        const tDesc = String(target.originalDescription || target.description || '').toLowerCase().trim();
+        const tDescOd = String(target.originalDescription || '').toLowerCase().trim();
+        const tDescD  = String(target.description || '').toLowerCase().trim();
         const tAmt  = Number(target.amount || 0).toFixed(2);
         for (let r = 1; r < data.length; r++) {
           const pd = fmtDate(data[r][pdCol]);
-          const rd = String(data[r][odCol] || data[r][dCol] || '').toLowerCase().trim();
+          const rod = String(data[r][odCol] || '').toLowerCase().trim();
+          const rd  = String(data[r][dCol]  || '').toLowerCase().trim();
           const mi = Number(data[r][miCol]) || 0;
           const mo = Number(data[r][moCol]) || 0;
           const fe = Number(data[r][feCol]) || 0;
           const ra = (mi + mo + fe).toFixed(2);
-          if (pd === tDate && rd === tDesc && ra === tAmt) return r + 1;
+          // Match if posting date + amount agree AND either description
+          // field on the row matches either description field the client
+          // sent. Caters for Capitec's (Pending) prefix landing in one
+          // column but not the other.
+          if (pd === tDate && ra === tAmt) {
+            const descMatches =
+              (tDescOd && (rod === tDescOd || rd === tDescOd)) ||
+              (tDescD  && (rod === tDescD  || rd === tDescD));
+            if (descMatches) return r + 1;
+          }
         }
         return -1;
       };
