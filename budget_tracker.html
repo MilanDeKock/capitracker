@@ -722,6 +722,16 @@ function BudgetTracker() {
       'The kept row\'s Line classification is preserved.'
     )) return;
 
+    // Optimistic UI: drop loser from local state immediately so the user
+    // sees the change before the round-trip to the Sheet completes. The
+    // loadFromSheet() at the end will reconcile against canonical data.
+    if (loser.inHistory) {
+      setHistory(h => h.filter(t => txHash(t) !== loser.hash));
+    } else {
+      addHiddenHash(loser.hash);
+    }
+    setSyncStatus({ kind: 'ok', message: 'Merging — syncing with Sheet…', when: new Date() });
+
     try {
       // Step 1: if loser has a meaningful Line and winner doesn't, transfer
       // it. Only matters when winner is in history (raw rows pick up Line
@@ -740,10 +750,9 @@ function BudgetTracker() {
       // Step 2: get rid of the loser. Different paths depending on where
       // the loser lives:
       //   - in history (Transactions tab): real server-side delete
-      //   - in Bank Statement only (not yet posted): hide locally. We can't
-      //     delete it from the Sheet because the next sync would just bring
-      //     it back. Hiding via localStorage keeps it out of the merged
-      //     view, so it stops double-counting against the budget.
+      //   - in Bank Statement only (not yet posted): already hidden locally
+      //     above. The raw row stays in the Sheet (next sync would re-fetch
+      //     it anyway), but it stops counting toward your budget.
       if (loser.inHistory) {
         await sheetFetch(config, null, {
           action: 'delete-history',
@@ -755,13 +764,16 @@ function BudgetTracker() {
             amount:              loser.amount,
           },
         });
-        setSyncStatus({ kind: 'ok', message: 'Merged — removed ' + (loser.description || loser.originalDesc) + ' from history.', when: new Date() });
-      } else {
-        addHiddenHash(loser.hash);
-        setSyncStatus({ kind: 'ok', message: 'Merged — hid the duplicate from view (Bank Statement row).', when: new Date() });
       }
 
       await loadFromSheet();
+      setSyncStatus({
+        kind: 'ok',
+        message: loser.inHistory
+          ? 'Merged — removed ' + (loser.description || loser.originalDesc) + ' from history.'
+          : 'Merged — hid the Bank Statement duplicate.',
+        when: new Date(),
+      });
     } catch (e) {
       setSyncStatus({ kind: 'err', message: 'Merge failed: ' + (e.message || String(e)), when: new Date() });
     }
