@@ -706,6 +706,8 @@ function BudgetTracker() {
       setSyncStatus({ kind: 'err', message: 'Merge aborted: needed 2 selected rows, got ' + (txs ? txs.length : 0) + '. Try selecting again.', when: new Date() });
       return;
     }
+    console.log('[merge] tx[0]:', { date: txs[0].date, desc: txs[0].description, originalDesc: txs[0].originalDesc, amount: txs[0].amount, inHistory: txs[0].inHistory, hash: txs[0].hash });
+    console.log('[merge] tx[1]:', { date: txs[1].date, desc: txs[1].description, originalDesc: txs[1].originalDesc, amount: txs[1].amount, inHistory: txs[1].inHistory, hash: txs[1].hash });
     const isPending = t => /^\s*\(pending\)/i.test(t.originalDesc || '') || /^\s*\(pending\)/i.test(t.description || '');
     let loser, winner;
     const aPending = isPending(txs[0]);
@@ -716,12 +718,19 @@ function BudgetTracker() {
       if ((txs[0].date || '') <= (txs[1].date || '')) { loser = txs[0]; winner = txs[1]; }
       else                                            { loser = txs[1]; winner = txs[0]; }
     }
-    if (!confirm(
+    console.log('[merge] loser:', { date: loser.date, desc: loser.description, inHistory: loser.inHistory, hash: loser.hash });
+    console.log('[merge] winner:', { date: winner.date, desc: winner.description, inHistory: winner.inHistory, hash: winner.hash });
+    const confirmed = confirm(
       'Merge these two rows?\n\n' +
       'KEEP: ' + winner.date + ' — ' + (winner.description || winner.originalDesc) + '\n' +
       'REMOVE: ' + loser.date + ' — ' + (loser.description || loser.originalDesc) + '\n\n' +
       'The kept row\'s Line classification is preserved.'
-    )) return;
+    );
+    console.log('[merge] confirm result:', confirmed);
+    if (!confirmed) {
+      setSyncStatus({ kind: 'err', message: 'Merge cancelled.', when: new Date() });
+      return;
+    }
 
     // Optimistic UI: drop loser from local state immediately so the user
     // sees the change before the round-trip to the Sheet completes. The
@@ -755,7 +764,8 @@ function BudgetTracker() {
       //     above. The raw row stays in the Sheet (next sync would re-fetch
       //     it anyway), but it stops counting toward your budget.
       if (loser.inHistory) {
-        await sheetFetch(config, null, {
+        console.log('[merge] sending delete-history for loser', loser.hash);
+        const delRes = await sheetFetch(config, null, {
           action: 'delete-history',
           hash: loser.hash,
           match: {
@@ -765,9 +775,14 @@ function BudgetTracker() {
             amount:              loser.amount,
           },
         });
+        console.log('[merge] delete-history result:', delRes);
+      } else {
+        console.log('[merge] loser is not in history — added hash to hiddenHashes only');
       }
 
+      console.log('[merge] reloading sheet…');
       await loadFromSheet();
+      console.log('[merge] done');
       setSyncStatus({
         kind: 'ok',
         message: loser.inHistory
