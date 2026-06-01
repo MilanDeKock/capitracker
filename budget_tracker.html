@@ -682,6 +682,34 @@ function BudgetTracker() {
     }
   }
 
+  async function handleMergeTwoSelected(txs) {
+    // User selected exactly two rows and asked to merge them. One must be
+    // pending, the other cleared.
+    if (!txs || txs.length !== 2) return;
+    const pending = txs.find(t => /^\s*\(pending\)/i.test(t.originalDesc || t.description || ''));
+    const cleared = txs.find(t => t !== pending);
+    if (!pending || !cleared) {
+      setSyncStatus({ kind: 'err', message: 'Pick one pending row and one cleared row.', when: new Date() });
+      return;
+    }
+    if (cleared === pending || /^\s*\(pending\)/i.test(cleared.originalDesc || cleared.description || '')) {
+      setSyncStatus({ kind: 'err', message: 'One of the two selected rows must NOT be pending.', when: new Date() });
+      return;
+    }
+    if (!confirm('Merge "' + (pending.description || pending.originalDesc) + '" into "' + (cleared.description || cleared.originalDesc) + '"?\n\nThe pending row will adopt the cleared row\'s date and description; the cleared row will be deleted. Your budget line is preserved.')) return;
+    try {
+      const res = await sheetFetch(config, null, {
+        action: 'merge-two-rows',
+        pending: { postingDate: pending.date, originalDescription: pending.originalDesc || pending.description, amount: pending.amount },
+        cleared: { postingDate: cleared.date, originalDescription: cleared.originalDesc || cleared.description, amount: cleared.amount },
+      });
+      setSyncStatus({ kind: 'ok', message: 'Merged.', when: new Date() });
+      await loadFromSheet();
+    } catch (e) {
+      setSyncStatus({ kind: 'err', message: 'Merge failed: ' + (e.message || String(e)), when: new Date() });
+    }
+  }
+
   async function handleApplyMerges() {
     if (!mergeProposals) return;
     const approved = mergeProposals.filter(p => mergeApproved.has(p.rowIdx));
@@ -1002,6 +1030,7 @@ function BudgetTracker() {
                                       onPostToHistory={handlePostToHistory}
                                       onEditHistoryLine={handleEditHistoryLine}
                                       onDeleteHistoryRow={handleDeleteHistoryRow}
+                                      onMergeTwoSelected={handleMergeTwoSelected}
                                       onUpdateSplits={handleUpdateSplits}
                                       onUpdateBudgetDate={handleUpdateBudgetDate}
                                       posting={loading}
@@ -1739,7 +1768,7 @@ function Dashboard({ budget: defaultBudget, budgetOverrides, effectiveBudgetForC
 /* ============================================================================
    Transactions
    ========================================================================== */
-function Transactions({ allTxs, lineNames, overrides, setOverride, clearOverride, anchorDay, onPostToHistory, onEditHistoryLine, onDeleteHistoryRow, onUpdateSplits, onUpdateBudgetDate, posting, newCount, newClassifiedCount, stillNeedingReview }) {
+function Transactions({ allTxs, lineNames, overrides, setOverride, clearOverride, anchorDay, onPostToHistory, onEditHistoryLine, onDeleteHistoryRow, onMergeTwoSelected, onUpdateSplits, onUpdateBudgetDate, posting, newCount, newClassifiedCount, stillNeedingReview }) {
   const [filterLine, setFL]     = useState('');
   const [filterCycle, setFC]    = useState('');
   const [filterStatus, setFS]   = useState('');
@@ -1771,6 +1800,20 @@ function Transactions({ allTxs, lineNames, overrides, setOverride, clearOverride
     () => allTxs.reduce((n, t) => n + (selected.has(t.hash) && t.inHistory ? 1 : 0), 0),
     [allTxs, selected]
   );
+
+  // "Merge selected" eligibility: exactly two selected rows in history,
+  // one pending and one not. Both selected ones must be in history because
+  // we can only merge what's been posted.
+  const mergePair = useMemo(() => {
+    if (selected.size !== 2) return null;
+    const picks = allTxs.filter(t => selected.has(t.hash));
+    if (picks.length !== 2) return null;
+    if (!picks.every(t => t.inHistory)) return null;
+    const isPending = t => /^\s*\(pending\)/i.test(t.originalDesc || t.description || '');
+    const pCount = picks.filter(isPending).length;
+    if (pCount !== 1) return null;  // must be exactly one pending and one cleared
+    return picks;
+  }, [selected, allTxs]);
 
   const toggleOne = (hash) => {
     const next = new Set(selected);
@@ -1866,6 +1909,13 @@ function Transactions({ allTxs, lineNames, overrides, setOverride, clearOverride
                       className="px-3 py-1 text-xs uppercase tracking-wider font-medium border border-red-300 text-red-700 hover:bg-red-50 flex items-center gap-1.5">
                 <IconTrash className="w-3.5 h-3.5" />
                 Delete {selectedInHistoryCount} from history
+              </button>
+            )}
+            {mergePair && (
+              <button onClick={() => { onMergeTwoSelected(mergePair); setSelected(new Set()); }}
+                      title="Treat these two as the same transaction: the pending row adopts the cleared row's date and description; the cleared row is removed."
+                      className="px-3 py-1 text-xs uppercase tracking-wider font-medium border border-amber-700 bg-amber-700 text-white hover:bg-amber-800">
+                Merge 2 selected →
               </button>
             )}
             <button onClick={clearSelection} className="ml-auto px-3 py-1 text-xs uppercase tracking-wider text-stone-500 hover:text-stone-900">
