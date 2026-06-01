@@ -182,6 +182,8 @@ function pullStatements_(mode) {
   const threads = GmailApp.search(GMAIL_QUERY, 0, 30);
   const collected = [];
   const seenHashes = new Set();
+  // Persistent merge-away list — skip rows the user has hidden.
+  const hiddenSet = getHiddenHashes_();
   let csvCount = 0, pdfCount = 0, pdfTxCount = 0, pdfsParsed = 0;
   const aiEnabled = includePdf && !!PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
 
@@ -218,6 +220,7 @@ function pullStatements_(mode) {
             const txnDate = row[idx['Transaction Date']];
             const hash = (txnDate || postingDate) + '|' + desc + '|' + (mi + mo + fe).toFixed(2);
             if (seenHashes.has(hash)) continue;
+            if (hiddenSet.has(hash)) continue;
             seenHashes.add(hash);
             collected.push(out);
           }
@@ -242,6 +245,7 @@ function pullStatements_(mode) {
               const desc = normalizeDesc_(tx.originalDescription || tx.description);
               const hash = (tx.transactionDate || tx.postingDate) + '|' + desc + '|' + (mi + mo + fe).toFixed(2);
               if (seenHashes.has(hash)) continue;
+              if (hiddenSet.has(hash)) continue;
               seenHashes.add(hash);
               const out = HEADERS[T_RAW].map(h => {
                 if (h === 'Nr')                  return '';
@@ -341,6 +345,10 @@ function doPost(e) {
         return jsonOut_(applyPendingMerges_(body.proposals || []));
       case 'merge-two-rows':
         return jsonOut_(mergeTwoRows_(body.pending, body.cleared));
+      case 'add-hidden-hash':
+        return jsonOut_(addHiddenHashServer_(body.hash));
+      case 'remove-hidden-hash':
+        return jsonOut_(removeHiddenHashServer_(body.hash));
       case 'save-budget':
         return jsonOut_(overwriteTab_(T_BUDGET, body.rows || []));
       case 'save-budget-overrides':
@@ -415,6 +423,44 @@ function readSettings_() {
   const out = {};
   rows.forEach(r => { if (r.Key !== undefined && r.Key !== '') out[String(r.Key)] = r.Value; });
   return out;
+}
+
+// Hidden Hashes — persistent merged-away list. Lives in Settings as a
+// single JSON-array string under the 'HiddenHashes' key.
+const SETTING_HIDDEN_HASHES = 'HiddenHashes';
+function getHiddenHashes_() {
+  const raw = readSettings_()[SETTING_HIDDEN_HASHES];
+  if (!raw) return new Set();
+  try {
+    const arr = JSON.parse(String(raw));
+    return new Set(Array.isArray(arr) ? arr : []);
+  } catch (_) { return new Set(); }
+}
+function writeHiddenHashes_(set) {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(T_SETTINGS);
+  if (!sheet) return { ok: false, error: 'no Settings tab' };
+  const data = sheet.getDataRange().getValues();
+  const json = JSON.stringify(Array.from(set));
+  for (let r = 1; r < data.length; r++) {
+    if (String(data[r][0] || '') === SETTING_HIDDEN_HASHES) {
+      sheet.getRange(r + 1, 2).setValue(json);
+      return { ok: true };
+    }
+  }
+  sheet.appendRow([SETTING_HIDDEN_HASHES, json]);
+  return { ok: true };
+}
+function addHiddenHashServer_(hash) {
+  if (!hash) return { ok: false, error: 'hash required' };
+  const set = getHiddenHashes_();
+  set.add(String(hash));
+  return writeHiddenHashes_(set);
+}
+function removeHiddenHashServer_(hash) {
+  if (!hash) return { ok: false, error: 'hash required' };
+  const set = getHiddenHashes_();
+  set.delete(String(hash));
+  return writeHiddenHashes_(set);
 }
 
 // ============================================================================

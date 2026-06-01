@@ -334,18 +334,23 @@ function BudgetTracker() {
   // you see it. User can tap in their actual current balance from the banking
   // app; it stays applied until they click clear or sync newer data.
   const [balanceOverride, setBalanceOverride] = useState(() => loadLS(K.balanceOverride, null));
-  // Hashes of Bank Statement rows the user has "merged away" — they're
-  // suppressed from the dashboard / Transactions view so they don't
-  // double-count against the budget. Stored as an array of hashes in
-  // localStorage so it survives reloads. The raw row itself stays in the
-  // Sheet (Bank Statement gets rebuilt on every sync anyway), so if the
-  // user wants the row back they can clear bt.hiddenHashes.
+  // Hashes of rows the user has merged away. PERSISTED TO THE SHEET (in
+  // Settings → "HiddenHashes") so the choice survives across browsers and
+  // CSV re-imports. localStorage is just a fast-path mirror — the source
+  // of truth is the server. pullStatements_ on the Apps Script side reads
+  // this set and skips matching rows on every sync, so the duplicate
+  // never reappears.
   const [hiddenHashes, _setHiddenHashes] = useState(() => new Set(loadLS(K.hiddenHashes, [])));
-  const addHiddenHash = (h) => _setHiddenHashes(prev => {
-    const next = new Set(prev); next.add(h);
-    saveLS(K.hiddenHashes, Array.from(next));
-    return next;
-  });
+  const addHiddenHash = (h) => {
+    _setHiddenHashes(prev => {
+      const next = new Set(prev); next.add(h);
+      saveLS(K.hiddenHashes, Array.from(next));
+      return next;
+    });
+    // Fire-and-forget — UI shouldn't wait on this. Errors logged to console.
+    sheetFetch(config, null, { action: 'add-hidden-hash', hash: h })
+      .catch(e => console.error('[hiddenHashes] failed to persist to server:', e));
+  };
   const [loading, setLoading]             = useState(false);
   const [syncStatus, setSyncStatus]       = useState(null); // {kind:'ok'|'err', message, when}
   // Pending-merge review modal: null when closed, otherwise an array of
@@ -418,6 +423,20 @@ function BudgetTracker() {
       setBudgetOverrides(nOverrides);
       setRules(nRules);
       setSettings(nSettings);
+      // Hydrate hiddenHashes from the server's Settings → "HiddenHashes" key.
+      // Survives across browsers + CSV re-imports because pullStatements_
+      // on the server side reads the same list and skips matching rows.
+      try {
+        const hh = s['HiddenHashes'];
+        if (hh) {
+          const arr = JSON.parse(String(hh));
+          if (Array.isArray(arr)) {
+            const next = new Set(arr);
+            _setHiddenHashes(next);
+            saveLS(K.hiddenHashes, arr);
+          }
+        }
+      } catch (_) {}
       saveLS(K.cache, { rawStatements: nRaw, history: nHist, budget: nBudget, budgetOverrides: nOverrides, rules: nRules, settings: nSettings });
       const sourceLabel = pullMode === 'csv' ? 'CSV statements'
                         : pullMode === 'pdf' ? 'PDF statements (AI-parsed)'
