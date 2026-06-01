@@ -336,8 +336,10 @@
             return jsonOut_(updateHistoryBudgetDate_(body.hash, body.budgetDate || ''));
           case 'delete-history':
             return jsonOut_(deleteHistoryRow_(body));
-          case 'merge-pending':
-            return jsonOut_(mergePendingHistoryRows_());
+          case 'find-pending-merges':
+            return jsonOut_(findPendingMerges_());
+          case 'apply-pending-merges':
+            return jsonOut_(applyPendingMerges_(body.proposals || []));
           case 'save-budget':
             return jsonOut_(overwriteTab_(T_BUDGET, body.rows || []));
           case 'save-budget-overrides':
@@ -572,17 +574,16 @@
     }
 
     // Find pending rows in Transactions that have a cleared counterpart in
-    // Bank Statement (same account + amount, transaction date within 7 days)
-    // and update the pending row in-place with the cleared posting date +
-    // description. Preserves the user's Line / Splits / Budget Date /
-    // Category classifications.
+    // Bank Statement (same account + amount, transaction date within 7 days).
+    // Returns a list of merge PROPOSALS — does NOT modify the sheet. The
+    // client shows the user the proposals; they tick the ones to apply and
+    // call applyPendingMerges_ with the selected list.
     //
-    // Why this is needed: Capitec rewrites both the posting date and
-    // (sometimes) the merchant string when a pending tx clears, so the
-    // pending and cleared versions hash differently and look like two
-    // separate rows. This merge collapses them based on the immutable
-    // identifiers (account + amount + transaction date proximity).
-    function mergePendingHistoryRows_() {
+    // Why find/apply split: Capitec sometimes rewrites the merchant string
+    // between pending and cleared, so two real different purchases can look
+    // like a pending+cleared pair by accident. User-in-the-loop confirmation
+    // catches those before they corrupt history.
+    function findPendingMerges_() {
       const ss = SpreadsheetApp.getActiveSpreadsheet();
       const txnsSheet = ss.getSheetByName(T_HISTORY);
       const rawSheet  = ss.getSheetByName(T_RAW);
@@ -590,7 +591,7 @@
 
       const txnsData = txnsSheet.getDataRange().getValues();
       const rawData  = rawSheet.getDataRange().getValues();
-      if (txnsData.length < 2) return { ok: true, merged: 0 };
+      if (txnsData.length < 2) return { ok: true, proposals: [] };
 
       const tH = txnsData[0].map(String);
       const rH = rawData[0].map(String);
@@ -621,17 +622,16 @@
           const key = acc + '|' + amt;
           if (!clearedByKey[key]) clearedByKey[key] = [];
           clearedByKey[key].push({
-            postingDate:    fmtDate(rawData[r][rCol('Posting Date')]),
+            postingDate:     fmtDate(rawData[r][rCol('Posting Date')]),
             transactionDate: fmtDate(rawData[r][rCol('Transaction Date')] || rawData[r][rCol('Posting Date')]),
-            description:    String(rawData[r][rCol('Description')] || ''),
-            originalDesc:   String(rawData[r][rCol('Original Description')] || ''),
-            balance:        rawData[r][rCol('Balance')],
+            description:     String(rawData[r][rCol('Description')] || ''),
+            originalDesc:    String(rawData[r][rCol('Original Description')] || ''),
           });
         }
       }
 
-      let merged = 0;
-      const usedClearedKeys = new Set();  // avoid one cleared matching multiple pendings
+      const proposals = [];
+      const usedKeys = new Set();
 
       for (let r = 1; r < txnsData.length; r++) {
         const desc = String(txnsData[r][tCol('Original Description')] || txnsData[r][tCol('Description')] || '');
@@ -641,41 +641,81 @@
         const mi = Number(txnsData[r][tCol('Money In')]) || 0;
         const mo = Number(txnsData[r][tCol('Money Out')]) || 0;
         const fe = Number(txnsData[r][tCol('Fee')]) || 0;
-        const amt = (mi + mo + fe).toFixed(2);
+        const amount = mi + mo + fe;
+        const amt = amount.toFixed(2);
         const txnDate = fmtDate(txnsData[r][tCol('Transaction Date')] || txnsData[r][tCol('Posting Date')]);
+        const pendingPostingDate = fmtDate(txnsData[r][tCol('Posting Date')]);
+        const lineVal = tCol('Line') >= 0 ? String(txnsData[r][tCol('Line')] || '') : '';
 
         const key = acc + '|' + amt;
         const candidates = clearedByKey[key] || [];
 
-        // Pick closest unused cleared candidate within 7 days.
         let best = null;
         let bestDelta = Infinity;
-        let bestId = null;
+        let bestIdx = -1;
         for (let i = 0; i < candidates.length; i++) {
           const id = key + '|' + i;
-          if (usedClearedKeys.has(id)) continue;
-          const c = candidates[i];
-          const delta = daysBetween(txnDate, c.transactionDate);
+          if (usedKeys.has(id)) continue;
+          const delta = daysBetween(txnDate, candidates[i].transactionDate);
           if (delta <= 7 && delta < bestDelta) {
-            best = c;
+            best = candidates[i];
             bestDelta = delta;
-            bestId = id;
+            bestIdx = i;
           }
         }
-
         if (!best) continue;
-        usedClearedKeys.add(bestId);
+        usedKeys.add(key + '|' + bestIdx);
 
-        // Update the Transactions row in place — only the fields that change
-        // when a pending tx clears.
-        if (tCol('Posting Date')         >= 0) txnsSheet.getRange(r + 1, tCol('Posting Date') + 1).setValue(best.postingDate);
-        if (tCol('Transaction Date')     >= 0 && best.transactionDate) txnsSheet.getRange(r + 1, tCol('Transaction Date') + 1).setValue(best.transactionDate);
-        if (tCol('Description')          >= 0 && best.description)    txnsSheet.getRange(r + 1, tCol('Description') + 1).setValue(best.description);
-        if (tCol('Original Description') >= 0 && best.originalDesc)   txnsSheet.getRange(r + 1, tCol('Original Description') + 1).setValue(best.originalDesc);
-        merged++;
+        proposals.push({
+          rowIdx: r + 1,  // 1-based sheet row
+          pending: {
+            postingDate: pendingPostingDate,
+            description: desc,
+            amount: amount,
+            account: acc,
+            line: lineVal,
+          },
+          cleared: {
+            postingDate: best.postingDate,
+            transactionDate: best.transactionDate,
+            description: best.description,
+            originalDesc: best.originalDesc,
+          },
+          daysApart: bestDelta,
+        });
       }
 
-      return { ok: true, merged, message: 'Merged ' + merged + ' pending row(s) with cleared counterparts.' };
+      return { ok: true, proposals };
+    }
+
+    // Apply only the proposals the user has approved. Each proposal carries
+    // its target row index and the cleared field values to write.
+    function applyPendingMerges_(proposals) {
+      if (!proposals || !proposals.length) return { ok: true, merged: 0 };
+      const txnsSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(T_HISTORY);
+      if (!txnsSheet) return { ok: false, error: 'no Transactions tab' };
+      const headers = txnsSheet.getRange(1, 1, 1, txnsSheet.getLastColumn()).getValues()[0].map(String);
+      const tCol = (n) => headers.indexOf(n);
+
+      // Re-confirm each target row is still a pending row before overwriting.
+      // Protects against the sheet shifting under us between find and apply.
+      let merged = 0;
+      for (const p of proposals) {
+        if (!p.rowIdx || !p.cleared) continue;
+        const odCol = tCol('Original Description');
+        const dCol  = tCol('Description');
+        if (odCol < 0 && dCol < 0) continue;
+        const checkRange = txnsSheet.getRange(p.rowIdx, 1, 1, txnsSheet.getLastColumn()).getValues()[0];
+        const checkDesc = String((odCol >= 0 ? checkRange[odCol] : '') || (dCol >= 0 ? checkRange[dCol] : ''));
+        if (!isPendingDesc_(checkDesc)) continue;  // row no longer pending — skip
+
+        if (tCol('Posting Date')         >= 0) txnsSheet.getRange(p.rowIdx, tCol('Posting Date') + 1).setValue(p.cleared.postingDate);
+        if (tCol('Transaction Date')     >= 0 && p.cleared.transactionDate) txnsSheet.getRange(p.rowIdx, tCol('Transaction Date') + 1).setValue(p.cleared.transactionDate);
+        if (tCol('Description')          >= 0 && p.cleared.description)    txnsSheet.getRange(p.rowIdx, tCol('Description') + 1).setValue(p.cleared.description);
+        if (tCol('Original Description') >= 0 && p.cleared.originalDesc)   txnsSheet.getRange(p.rowIdx, tCol('Original Description') + 1).setValue(p.cleared.originalDesc);
+        merged++;
+      }
+      return { ok: true, merged };
     }
 
     // Strip transient bank markers (e.g. Capitec's "(Pending)" prefix on
