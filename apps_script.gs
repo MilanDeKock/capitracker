@@ -310,14 +310,50 @@
       }
       const action = params.action || 'load';
       try {
+        // Reads / data pulls
         if (action === 'load') return jsonOut_(loadAll_());
         if (action === 'pull')     { pullStatements_('all'); return jsonOut_(loadAll_()); }
         if (action === 'pull-csv') { pullStatements_('csv'); return jsonOut_(loadAll_()); }
         if (action === 'pull-pdf') { pullStatements_('pdf'); return jsonOut_(loadAll_()); }
         if (action === 'ping') return jsonOut_({ ok: true, message: 'pong' });
+
+        // State-changing actions via GET — added because Apps Script's
+        // POST → 302 redirect → googleusercontent chain is unreliable in
+        // multi-Google-account browsers. The same action via GET goes
+        // through the redirect cleanly. params.body is a URL-encoded JSON
+        // string with the action's normal body shape.
+        if (params.body) {
+          const body = JSON.parse(params.body);
+          return jsonOut_(handleAction_(action, body));
+        }
+
         return jsonOut_({ ok: false, error: 'unknown action: ' + action });
       } catch (err) {
         return jsonOut_({ ok: false, error: String(err) });
+      }
+    }
+
+    // Shared action dispatcher — used by both doPost (canonical) and doGet
+    // (when called with action + body= query params). Kept identical so the
+    // client can pick GET or POST per call without surprises.
+    function handleAction_(action, body) {
+      switch (action) {
+        case 'append-history':       return appendHistory_(body.rows || []);
+        case 'update-history':       return updateHistoryLine_(body.hash, body.line);
+        case 'update-splits':        return updateHistorySplits_(body.hash, body.splits || '');
+        case 'update-budget-date':   return updateHistoryBudgetDate_(body.hash, body.budgetDate || '');
+        case 'delete-history':       return deleteHistoryRow_(body);
+        case 'find-pending-merges':  return findPendingMerges_();
+        case 'apply-pending-merges': return applyPendingMerges_(body.proposals || []);
+        case 'merge-two-rows':       return mergeTwoRows_(body.pending, body.cleared);
+        case 'add-hidden-hash':      return addHiddenHashServer_(body.hash);
+        case 'remove-hidden-hash':   return removeHiddenHashServer_(body.hash);
+        case 'save-budget':          return overwriteTab_(T_BUDGET, body.rows || []);
+        case 'save-budget-overrides':return overwriteTab_(T_OVERRIDES, body.rows || []);
+        case 'save-rules':           return overwriteTab_(T_RULES, body.rows || []);
+        case 'save-settings':        return overwriteSettings_(body.settings || {});
+        case 'chat':                 return chatWithGemini_(body.messages || [], body.context || {});
+        default:                     return { ok: false, error: 'unknown action: ' + action };
       }
     }
 
@@ -332,40 +368,7 @@
       }
 
       try {
-        switch (body.action) {
-          case 'append-history':
-            return jsonOut_(appendHistory_(body.rows || []));
-          case 'update-history':
-            return jsonOut_(updateHistoryLine_(body.hash, body.line));
-          case 'update-splits':
-            return jsonOut_(updateHistorySplits_(body.hash, body.splits || ''));
-          case 'update-budget-date':
-            return jsonOut_(updateHistoryBudgetDate_(body.hash, body.budgetDate || ''));
-          case 'delete-history':
-            return jsonOut_(deleteHistoryRow_(body));
-          case 'find-pending-merges':
-            return jsonOut_(findPendingMerges_());
-          case 'apply-pending-merges':
-            return jsonOut_(applyPendingMerges_(body.proposals || []));
-          case 'merge-two-rows':
-            return jsonOut_(mergeTwoRows_(body.pending, body.cleared));
-          case 'add-hidden-hash':
-            return jsonOut_(addHiddenHashServer_(body.hash));
-          case 'remove-hidden-hash':
-            return jsonOut_(removeHiddenHashServer_(body.hash));
-          case 'save-budget':
-            return jsonOut_(overwriteTab_(T_BUDGET, body.rows || []));
-          case 'save-budget-overrides':
-            return jsonOut_(overwriteTab_(T_OVERRIDES, body.rows || []));
-          case 'save-rules':
-            return jsonOut_(overwriteTab_(T_RULES, body.rows || []));
-          case 'save-settings':
-            return jsonOut_(overwriteSettings_(body.settings || {}));
-          case 'chat':
-            return jsonOut_(chatWithGemini_(body.messages || [], body.context || {}));
-          default:
-            return jsonOut_({ ok: false, error: 'unknown action: ' + body.action });
-        }
+        return jsonOut_(handleAction_(body.action, body));
       } catch (err) {
         return jsonOut_({ ok: false, error: String(err) });
       }

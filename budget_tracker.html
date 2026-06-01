@@ -285,17 +285,28 @@ async function sheetFetch(config, action, body) {
     throw new Error('Sheet not configured — set URL and token in the Setup tab.');
   }
   let res;
-  if (body) {
+  // Everything goes through GET — Apps Script's POST → 302 redirect chain
+  // is unreliable in multi-Google-account browsers and with some privacy
+  // extensions, which silently drops the POST body. GETs handle the
+  // same redirect cleanly. The token + action + body all go as query
+  // params, with the body URL-encoded as JSON.
+  //
+  // URL length: most browsers handle 8K+. The biggest payload (save-rules
+  // for a heavy ruleset) is ~4K. Append-history with many rows is the only
+  // potential overflow case and falls back to POST below.
+  const bodyParam = body ? '&body=' + encodeURIComponent(JSON.stringify(body)) : '';
+  const finalAction = (body && body.action) || action;
+  const url = `${config.sheetUrl}?token=${encodeURIComponent(config.sheetToken)}&action=${encodeURIComponent(finalAction)}${bodyParam}&_=${Date.now()}`;
+
+  // If the URL is over 6K, fall back to POST. Above that some networking
+  // gear truncates query strings.
+  if (url.length > 6000) {
     res = await fetch(config.sheetUrl, {
       method: 'POST',
-      body: JSON.stringify({ token: config.sheetToken, action, ...body }),
+      body: JSON.stringify({ token: config.sheetToken, action: finalAction, ...body }),
       redirect: 'follow',
     });
   } else {
-    // Cache buster — the Apps Script redirect chain can hand back stale
-    // responses if the browser thinks the URL hasn't changed between
-    // calls. Adding a per-call nonce forces a fresh fetch every time.
-    const url = `${config.sheetUrl}?token=${encodeURIComponent(config.sheetToken)}&action=${action}&_=${Date.now()}`;
     res = await fetch(url, { redirect: 'follow', cache: 'no-store' });
   }
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
