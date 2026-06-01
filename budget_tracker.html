@@ -699,12 +699,13 @@ function BudgetTracker() {
   async function handleMergeTwoSelected(txs) {
     // Pragmatic merge: pick the "loser" (pending if exactly one is tagged
     // (Pending), else the older-dated one) and DELETE it. The winner stays
-    // as-is with its date, description, and classification intact. Before
-    // deleting, if the loser has a Line set and the winner doesn't (or has
-    // 'Review'), transfer the Line so the user's classification work isn't
-    // lost. Uses existing delete-history + update-history endpoints — no
-    // dependency on a single all-in-one merge endpoint.
-    if (!txs || txs.length !== 2) return;
+    // as-is with its date, description, and classification intact.
+    console.log('[merge] handler called with txs=', txs);
+    if (!txs || txs.length !== 2) {
+      console.warn('[merge] aborted — expected 2 txs, got:', txs ? txs.length : 'null');
+      setSyncStatus({ kind: 'err', message: 'Merge aborted: needed 2 selected rows, got ' + (txs ? txs.length : 0) + '. Try selecting again.', when: new Date() });
+      return;
+    }
     const isPending = t => /^\s*\(pending\)/i.test(t.originalDesc || '') || /^\s*\(pending\)/i.test(t.description || '');
     let loser, winner;
     const aPending = isPending(txs[0]);
