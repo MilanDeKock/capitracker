@@ -335,7 +335,9 @@
           case 'update-budget-date':
             return jsonOut_(updateHistoryBudgetDate_(body.hash, body.budgetDate || ''));
           case 'delete-history':
-            return jsonOut_(deleteHistoryRow_(body.hash));
+            return jsonOut_(deleteHistoryRow_(body));
+          case 'merge-pending':
+            return jsonOut_(mergePendingHistoryRows_());
           case 'save-budget':
             return jsonOut_(overwriteTab_(T_BUDGET, body.rows || []));
           case 'save-budget-overrides':
@@ -493,22 +495,187 @@
       return { ok: true };
     }
 
-    // Deletes ALL rows matching the hash, not just the first. Hash collapses
-    // "(Pending) X" and "X" to the same value, so a sheet that accumulated
-    // both copies pre-fix has two rows for one logical transaction — the
-    // user expects one delete click to remove the whole thing.
-    function deleteHistoryRow_(hash) {
-      if (!hash) return { ok: false, error: 'hash required' };
+    // Deletes ALL rows matching the request, not just the first.
+    //
+    // Accepts either:
+    //   { hash: 'xxx' }                                     (legacy)
+    //   { match: { postingDate, originalDescription, amount } }  (preferred)
+    //
+    // Field-based matching is more robust than hash because client and
+    // server hash logic can drift across versions and silently miss rows.
+    // Field match compares raw posting date + (case-insensitive trimmed)
+    // description + amount-to-2dp — what the user sees on screen.
+    function deleteHistoryRow_(req) {
+      if (!req) return { ok: false, error: 'no request' };
+
+      // Prefer field-based match when client sent it (modern flow).
+      if (req.match) {
+        const m = req.match;
+        return deleteHistoryByMatch_(m);
+      }
+
+      if (!req.hash) return { ok: false, error: 'provide hash or match' };
       let deleted = 0;
       while (true) {
-        const { sheet, rowIdx } = findHistoryRowByHash_(hash);
+        const { sheet, rowIdx } = findHistoryRowByHash_(req.hash);
         if (rowIdx < 0) break;
         sheet.deleteRow(rowIdx);
         deleted++;
-        if (deleted > 50) break; // safety: don't loop forever on weird data
+        if (deleted > 50) break;
       }
-      if (deleted === 0) return { ok: false, error: 'row not found' };
+      if (deleted === 0) return { ok: false, error: 'row not found by hash' };
       return { ok: true, deleted };
+    }
+
+    // Delete rows where raw fields (posting date + description + amount)
+    // match. Used when hash matching is unreliable.
+    function deleteHistoryByMatch_(m) {
+      const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(T_HISTORY);
+      if (!sheet) return { ok: false, error: 'no Transactions tab' };
+      const data = sheet.getDataRange().getValues();
+      if (data.length < 2) return { ok: false, error: 'no rows' };
+      const headers = data[0].map(String);
+      const tz = Session.getScriptTimeZone();
+
+      const pdCol = headers.indexOf('Posting Date');
+      const odCol = headers.indexOf('Original Description');
+      const dCol  = headers.indexOf('Description');
+      const miCol = headers.indexOf('Money In');
+      const moCol = headers.indexOf('Money Out');
+      const feCol = headers.indexOf('Fee');
+
+      const targetDate   = String(m.postingDate || '');
+      const targetDesc   = normalizeDesc_(m.originalDescription || m.description);
+      const targetAmount = Number(m.amount || 0).toFixed(2);
+
+      let deleted = 0;
+      // Bottom-up so deletes don't shift indices we're iterating over.
+      for (let r = data.length - 1; r >= 1; r--) {
+        let pd = data[r][pdCol];
+        if (pd instanceof Date) pd = Utilities.formatDate(pd, tz, 'yyyy-MM-dd');
+        pd = String(pd || '');
+        const rowDesc = normalizeDesc_(data[r][odCol] || data[r][dCol]);
+        const mi = Number(data[r][miCol]) || 0;
+        const mo = Number(data[r][moCol]) || 0;
+        const fe = Number(data[r][feCol]) || 0;
+        const rowAmt = (mi + mo + fe).toFixed(2);
+
+        if (pd === targetDate && rowDesc === targetDesc && rowAmt === targetAmount) {
+          sheet.deleteRow(r + 1);
+          deleted++;
+          if (deleted > 50) break;
+        }
+      }
+
+      if (deleted === 0) return { ok: false, error: 'no row matched' };
+      return { ok: true, deleted };
+    }
+
+    // Find pending rows in Transactions that have a cleared counterpart in
+    // Bank Statement (same account + amount, transaction date within 7 days)
+    // and update the pending row in-place with the cleared posting date +
+    // description. Preserves the user's Line / Splits / Budget Date /
+    // Category classifications.
+    //
+    // Why this is needed: Capitec rewrites both the posting date and
+    // (sometimes) the merchant string when a pending tx clears, so the
+    // pending and cleared versions hash differently and look like two
+    // separate rows. This merge collapses them based on the immutable
+    // identifiers (account + amount + transaction date proximity).
+    function mergePendingHistoryRows_() {
+      const ss = SpreadsheetApp.getActiveSpreadsheet();
+      const txnsSheet = ss.getSheetByName(T_HISTORY);
+      const rawSheet  = ss.getSheetByName(T_RAW);
+      if (!txnsSheet || !rawSheet) return { ok: false, error: 'tabs missing' };
+
+      const txnsData = txnsSheet.getDataRange().getValues();
+      const rawData  = rawSheet.getDataRange().getValues();
+      if (txnsData.length < 2) return { ok: true, merged: 0 };
+
+      const tH = txnsData[0].map(String);
+      const rH = rawData[0].map(String);
+      const tz = Session.getScriptTimeZone();
+      const tCol = (n) => tH.indexOf(n);
+      const rCol = (n) => rH.indexOf(n);
+
+      const fmtDate = v => {
+        if (v instanceof Date) return Utilities.formatDate(v, tz, 'yyyy-MM-dd');
+        return String(v || '').slice(0, 10);
+      };
+      const daysBetween = (a, b) => {
+        if (!a || !b) return Infinity;
+        return Math.abs((new Date(a) - new Date(b)) / 86400000);
+      };
+
+      // Index cleared raw rows by account + amount for fast candidate lookup.
+      const clearedByKey = {};
+      if (rawData.length > 1) {
+        for (let r = 1; r < rawData.length; r++) {
+          const desc = String(rawData[r][rCol('Original Description')] || rawData[r][rCol('Description')] || '');
+          if (isPendingDesc_(desc)) continue;
+          const acc = String(rawData[r][rCol('Account')] || '');
+          const mi = Number(rawData[r][rCol('Money In')]) || 0;
+          const mo = Number(rawData[r][rCol('Money Out')]) || 0;
+          const fe = Number(rawData[r][rCol('Fee')]) || 0;
+          const amt = (mi + mo + fe).toFixed(2);
+          const key = acc + '|' + amt;
+          if (!clearedByKey[key]) clearedByKey[key] = [];
+          clearedByKey[key].push({
+            postingDate:    fmtDate(rawData[r][rCol('Posting Date')]),
+            transactionDate: fmtDate(rawData[r][rCol('Transaction Date')] || rawData[r][rCol('Posting Date')]),
+            description:    String(rawData[r][rCol('Description')] || ''),
+            originalDesc:   String(rawData[r][rCol('Original Description')] || ''),
+            balance:        rawData[r][rCol('Balance')],
+          });
+        }
+      }
+
+      let merged = 0;
+      const usedClearedKeys = new Set();  // avoid one cleared matching multiple pendings
+
+      for (let r = 1; r < txnsData.length; r++) {
+        const desc = String(txnsData[r][tCol('Original Description')] || txnsData[r][tCol('Description')] || '');
+        if (!isPendingDesc_(desc)) continue;
+
+        const acc = String(txnsData[r][tCol('Account')] || '');
+        const mi = Number(txnsData[r][tCol('Money In')]) || 0;
+        const mo = Number(txnsData[r][tCol('Money Out')]) || 0;
+        const fe = Number(txnsData[r][tCol('Fee')]) || 0;
+        const amt = (mi + mo + fe).toFixed(2);
+        const txnDate = fmtDate(txnsData[r][tCol('Transaction Date')] || txnsData[r][tCol('Posting Date')]);
+
+        const key = acc + '|' + amt;
+        const candidates = clearedByKey[key] || [];
+
+        // Pick closest unused cleared candidate within 7 days.
+        let best = null;
+        let bestDelta = Infinity;
+        let bestId = null;
+        for (let i = 0; i < candidates.length; i++) {
+          const id = key + '|' + i;
+          if (usedClearedKeys.has(id)) continue;
+          const c = candidates[i];
+          const delta = daysBetween(txnDate, c.transactionDate);
+          if (delta <= 7 && delta < bestDelta) {
+            best = c;
+            bestDelta = delta;
+            bestId = id;
+          }
+        }
+
+        if (!best) continue;
+        usedClearedKeys.add(bestId);
+
+        // Update the Transactions row in place — only the fields that change
+        // when a pending tx clears.
+        if (tCol('Posting Date')         >= 0) txnsSheet.getRange(r + 1, tCol('Posting Date') + 1).setValue(best.postingDate);
+        if (tCol('Transaction Date')     >= 0 && best.transactionDate) txnsSheet.getRange(r + 1, tCol('Transaction Date') + 1).setValue(best.transactionDate);
+        if (tCol('Description')          >= 0 && best.description)    txnsSheet.getRange(r + 1, tCol('Description') + 1).setValue(best.description);
+        if (tCol('Original Description') >= 0 && best.originalDesc)   txnsSheet.getRange(r + 1, tCol('Original Description') + 1).setValue(best.originalDesc);
+        merged++;
+      }
+
+      return { ok: true, merged, message: 'Merged ' + merged + ' pending row(s) with cleared counterparts.' };
     }
 
     // Strip transient bank markers (e.g. Capitec's "(Pending)" prefix on
@@ -516,6 +683,11 @@
     // was imported as pending or after it cleared.
     function normalizeDesc_(s) {
       return String(s || '').toLowerCase().replace(/^\s*\(pending\)\s*/i, '').trim();
+    }
+
+    // True if a description marks the row as still-pending.
+    function isPendingDesc_(s) {
+      return /^\s*\(pending\)\s*/i.test(String(s || ''));
     }
 
     // Anchor on Transaction Date — it stays stable when Capitec shifts a row's

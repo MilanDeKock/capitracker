@@ -637,15 +637,39 @@ function BudgetTracker() {
     }
   }
 
-  async function handleDeleteHistoryRow(hash) {
+  async function handleDeleteHistoryRow(hash, tx) {
     // Same functional-setState reason as handleEditHistoryLine — bulk deletes
     // need each call to see the previous call's filter result.
     setHistory(h => h.filter(t => txHash(t) !== hash));
+    // Send both hash (legacy) AND raw match fields. The server prefers match
+    // when present — it's more robust than hash across client/server version
+    // drift. tx may be undefined for older callers; in that case the server
+    // falls back to hash matching.
+    const body = { action: 'delete-history', hash };
+    if (tx) {
+      body.match = {
+        postingDate:         tx.date,
+        originalDescription: tx.originalDesc || tx.description,
+        amount:              tx.amount,
+      };
+    }
     try {
-      await sheetFetch(config, null, { action: 'delete-history', hash });
+      await sheetFetch(config, null, body);
       setSyncStatus({ kind: 'ok', message: 'Removed from history.', when: new Date() });
     } catch (e) {
       setSyncStatus({ kind: 'err', message: 'Delete failed: ' + (e.message || String(e)), when: new Date() });
+    }
+  }
+
+  async function handleMergePending() {
+    if (!confirm('Find pending transactions in your history that have a cleared counterpart in Bank Statement, and merge them?\n\nThe pending row will be updated in-place with the cleared date and description, preserving your budget line classification.\n\nMatching: same account + same amount + transaction date within 7 days.')) return;
+    try {
+      const res = await sheetFetch(config, null, { action: 'merge-pending' });
+      setSyncStatus({ kind: 'ok', message: res.message || ('Merged ' + (res.merged || 0) + ' rows.'), when: new Date() });
+      // Re-fetch so the merged rows show their new dates.
+      await loadFromSheet();
+    } catch (e) {
+      setSyncStatus({ kind: 'err', message: 'Merge failed: ' + (e.message || String(e)), when: new Date() });
     }
   }
 
@@ -896,6 +920,7 @@ function BudgetTracker() {
           onSyncCsv={() => loadFromSheet({ pullMode: 'csv' })}
           onSyncPdf={() => loadFromSheet({ pullMode: 'pdf' })}
           onReload={() => loadFromSheet()}
+          onMergePending={handleMergePending}
         />
       </div>
 
@@ -1117,7 +1142,7 @@ function ChatBot({ messages, sending, scope, setScope, onSend, onClose, onClear 
 /* ============================================================================
    Components
    ========================================================================== */
-function Uploader({ onFiles, fileNames, error, clear, configured, loading, onSyncCsv, onSyncPdf, onReload }) {
+function Uploader({ onFiles, fileNames, error, clear, configured, loading, onSyncCsv, onSyncPdf, onReload, onMergePending }) {
   const [hover, setHover] = useState(false);
   return (
     <div
@@ -1148,6 +1173,11 @@ function Uploader({ onFiles, fileNames, error, clear, configured, loading, onSyn
               </button>
               <button onClick={onReload} disabled={loading} className="px-2.5 py-1 text-xs uppercase tracking-wider font-medium border border-stone-300 text-stone-700 hover:bg-stone-100 disabled:opacity-50">
                 Reload sheet
+              </button>
+              <button onClick={onMergePending} disabled={loading}
+                      title="Find (Pending) rows in your Transactions that have a cleared counterpart in Bank Statement, and merge them. Preserves your budget line classification."
+                      className="px-2.5 py-1 text-xs uppercase tracking-wider font-medium border border-amber-700 text-amber-800 hover:bg-amber-700 hover:text-stone-50 disabled:opacity-50">
+                Merge pending
               </button>
             </>
           )}
@@ -1733,7 +1763,7 @@ function Transactions({ allTxs, lineNames, overrides, setOverride, clearOverride
     if (!selectedInHistoryCount) return;
     if (!confirm(`Delete ${selectedInHistoryCount} row${selectedInHistoryCount === 1 ? '' : 's'} from history? This removes them from your Google Sheet.`)) return;
     for (const t of allTxs) {
-      if (selected.has(t.hash) && t.inHistory) onDeleteHistoryRow(t.hash);
+      if (selected.has(t.hash) && t.inHistory) onDeleteHistoryRow(t.hash, t);
     }
     setSelected(new Set());
   };
@@ -1882,7 +1912,7 @@ function Transactions({ allTxs, lineNames, overrides, setOverride, clearOverride
                             </>
                           )}
                           <span className="inline-block px-1.5 py-0.5 text-[10px] uppercase tracking-wider bg-stone-200 text-stone-600 border border-stone-300">in history</span>
-                          <button onClick={() => { if (confirm('Remove this row from history? This deletes it from the Google Sheet.')) onDeleteHistoryRow(t.hash); }}
+                          <button onClick={() => { if (confirm('Remove this row from history? This deletes it from the Google Sheet.')) onDeleteHistoryRow(t.hash, t); }}
                                   className="text-stone-400 hover:text-red-700" title="Remove from history">
                             <IconTrash className="w-3.5 h-3.5" />
                           </button>
