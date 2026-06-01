@@ -292,8 +292,11 @@ async function sheetFetch(config, action, body) {
       redirect: 'follow',
     });
   } else {
-    const url = `${config.sheetUrl}?token=${encodeURIComponent(config.sheetToken)}&action=${action}`;
-    res = await fetch(url, { redirect: 'follow' });
+    // Cache buster — the Apps Script redirect chain can hand back stale
+    // responses if the browser thinks the URL hasn't changed between
+    // calls. Adding a per-call nonce forces a fresh fetch every time.
+    const url = `${config.sheetUrl}?token=${encodeURIComponent(config.sheetToken)}&action=${action}&_=${Date.now()}`;
+    res = await fetch(url, { redirect: 'follow', cache: 'no-store' });
   }
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const data = await res.json();
