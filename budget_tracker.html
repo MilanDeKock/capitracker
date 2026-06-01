@@ -683,31 +683,58 @@ function BudgetTracker() {
   }
 
   async function handleMergeTwoSelected(txs) {
-    // User picked 2 rows. Treat the older one as "to be replaced" and the
-    // newer one as "the authoritative version" — its date and description
-    // win, and the older row is deleted. If one of them is tagged (Pending),
-    // prefer that as the older one (regardless of date) so the cleared
-    // version always wins.
+    // Pragmatic merge: pick the "loser" (pending if exactly one is tagged
+    // (Pending), else the older-dated one) and DELETE it. The winner stays
+    // as-is with its date, description, and classification intact. Before
+    // deleting, if the loser has a Line set and the winner doesn't (or has
+    // 'Review'), transfer the Line so the user's classification work isn't
+    // lost. Uses existing delete-history + update-history endpoints — no
+    // dependency on a single all-in-one merge endpoint.
     if (!txs || txs.length !== 2) return;
     const isPending = t => /^\s*\(pending\)/i.test(t.originalDesc || '') || /^\s*\(pending\)/i.test(t.description || '');
-    let older, newer;
+    let loser, winner;
     const aPending = isPending(txs[0]);
     const bPending = isPending(txs[1]);
-    if (aPending && !bPending)      { older = txs[0]; newer = txs[1]; }
-    else if (bPending && !aPending) { older = txs[1]; newer = txs[0]; }
+    if (aPending && !bPending)      { loser = txs[0]; winner = txs[1]; }
+    else if (bPending && !aPending) { loser = txs[1]; winner = txs[0]; }
     else {
-      // Neither or both are (Pending) — fall back to date order.
-      if ((txs[0].date || '') <= (txs[1].date || '')) { older = txs[0]; newer = txs[1]; }
-      else                                            { older = txs[1]; newer = txs[0]; }
+      if ((txs[0].date || '') <= (txs[1].date || '')) { loser = txs[0]; winner = txs[1]; }
+      else                                            { loser = txs[1]; winner = txs[0]; }
     }
-    if (!confirm('Merge these two rows?\n\nKEEP (date + description): ' + newer.date + ' — ' + (newer.description || newer.originalDesc) + '\nREMOVE: ' + older.date + ' — ' + (older.description || older.originalDesc) + '\n\nYour budget line classification on the kept row is preserved.')) return;
+    if (!confirm(
+      'Merge these two rows?\n\n' +
+      'KEEP: ' + winner.date + ' — ' + (winner.description || winner.originalDesc) + '\n' +
+      'REMOVE: ' + loser.date + ' — ' + (loser.description || loser.originalDesc) + '\n\n' +
+      'The kept row\'s Line classification is preserved.'
+    )) return;
+
     try {
+      // Step 1: if loser has a meaningful Line and winner doesn't, transfer it.
+      const loserLine  = (loser.line  || '').trim();
+      const winnerLine = (winner.line || '').trim();
+      const winnerIsUnclassified = !winnerLine || winnerLine.toLowerCase() === 'review';
+      if (loserLine && loserLine.toLowerCase() !== 'review' && winnerIsUnclassified) {
+        await sheetFetch(config, null, {
+          action: 'update-history',
+          hash: winner.hash,
+          line: loserLine,
+        });
+      }
+
+      // Step 2: delete the loser using the field-based delete that's known
+      // to work even when hashes drift.
       await sheetFetch(config, null, {
-        action: 'merge-two-rows',
-        pending: { postingDate: older.date, originalDescription: older.originalDesc || older.description, description: older.description, amount: older.amount },
-        cleared: { postingDate: newer.date, originalDescription: newer.originalDesc || newer.description, description: newer.description, amount: newer.amount },
+        action: 'delete-history',
+        hash: loser.hash,
+        match: {
+          postingDate:         loser.date,
+          originalDescription: loser.originalDesc || loser.description,
+          description:         loser.description,
+          amount:              loser.amount,
+        },
       });
-      setSyncStatus({ kind: 'ok', message: 'Merged.', when: new Date() });
+
+      setSyncStatus({ kind: 'ok', message: 'Merged — kept ' + (winner.description || winner.originalDesc), when: new Date() });
       await loadFromSheet();
     } catch (e) {
       setSyncStatus({ kind: 'err', message: 'Merge failed: ' + (e.message || String(e)), when: new Date() });

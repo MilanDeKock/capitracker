@@ -512,13 +512,17 @@
     function deleteHistoryRow_(req) {
       if (!req) return { ok: false, error: 'no request' };
 
-      // Prefer field-based match when client sent it (modern flow).
+      // Try field-based match first (more robust to hash drift).
       if (req.match) {
-        const m = req.match;
-        return deleteHistoryByMatch_(m);
+        const res = deleteHistoryByMatch_(req.match);
+        if (res.ok) return res;
+        // Fall through to hash matching if field match found nothing —
+        // covers edge cases where description normalization differs.
       }
 
-      if (!req.hash) return { ok: false, error: 'provide hash or match' };
+      if (!req.hash) {
+        return { ok: false, error: req.match ? 'no row matched fields, no hash provided' : 'provide hash or match' };
+      }
       let deleted = 0;
       while (true) {
         const { sheet, rowIdx } = findHistoryRowByHash_(req.hash);
@@ -527,7 +531,7 @@
         deleted++;
         if (deleted > 50) break;
       }
-      if (deleted === 0) return { ok: false, error: 'row not found by hash' };
+      if (deleted === 0) return { ok: false, error: 'row not found (tried match + hash)' };
       return { ok: true, deleted };
     }
 
