@@ -341,15 +341,20 @@ function BudgetTracker() {
   // this set and skips matching rows on every sync, so the duplicate
   // never reappears.
   const [hiddenHashes, _setHiddenHashes] = useState(() => new Set(loadLS(K.hiddenHashes, [])));
-  const addHiddenHash = (h) => {
+  // Returns a promise that resolves once the server has persisted the hash.
+  // Callers that subsequently call loadFromSheet must await this — otherwise
+  // the reload races the persist and overwrites local state with stale data.
+  const addHiddenHash = async (h) => {
     _setHiddenHashes(prev => {
       const next = new Set(prev); next.add(h);
       saveLS(K.hiddenHashes, Array.from(next));
       return next;
     });
-    // Fire-and-forget — UI shouldn't wait on this. Errors logged to console.
-    sheetFetch(config, null, { action: 'add-hidden-hash', hash: h })
-      .catch(e => console.error('[hiddenHashes] failed to persist to server:', e));
+    try {
+      await sheetFetch(config, null, { action: 'add-hidden-hash', hash: h });
+    } catch (e) {
+      console.error('[hiddenHashes] failed to persist to server:', e);
+    }
   };
   const [loading, setLoading]             = useState(false);
   const [syncStatus, setSyncStatus]       = useState(null); // {kind:'ok'|'err', message, when}
@@ -759,8 +764,6 @@ function BudgetTracker() {
     // loadFromSheet() at the end will reconcile against canonical data.
     if (loser.inHistory) {
       setHistory(h => h.filter(t => txHash(t) !== loser.hash));
-    } else {
-      addHiddenHash(loser.hash);
     }
     setSyncStatus({ kind: 'ok', message: 'Merging — syncing with Sheet…', when: new Date() });
 
@@ -798,8 +801,13 @@ function BudgetTracker() {
           },
         });
         console.log('[merge] delete-history result:', delRes);
+        // Also persist a hide for the loser hash — protects against the
+        // row being re-imported via a future CSV/PDF sync.
+        console.log('[merge] persisting hidden hash to server for safety', loser.hash);
+        await addHiddenHash(loser.hash);
       } else {
-        console.log('[merge] loser is not in history — added hash to hiddenHashes only');
+        console.log('[merge] persisting hidden hash to server (raw row)', loser.hash);
+        await addHiddenHash(loser.hash);
       }
 
       // Blow away the localStorage snapshot cache so the upcoming
