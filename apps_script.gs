@@ -53,7 +53,11 @@
     const HEADERS = {
       [T_RAW]:       ['Nr','Account','Posting Date','Transaction Date','Description','Original Description','Parent Category','Category','Money In','Money Out','Fee','Balance'],
       [T_HISTORY]:   ['Account','Posting Date','Transaction Date','Description','Original Description','Parent Category','Category','Money In','Money Out','Fee','Line','Splits','Budget Date','Posted At'],
-      [T_BUDGET]:    ['Line','Amount'],
+      // Forecast columns:
+      //   Forecast = 'daily' | 'fixed' | 'petrol' | '' (none)
+      //   L/100    = litres per 100 km (only used when Forecast='petrol')
+      //   Km/Day   = average km driven per day (only used when Forecast='petrol')
+      [T_BUDGET]:    ['Line','Amount','Forecast','L/100','Km/Day'],
       [T_OVERRIDES]: ['Cycle','Line','Amount'],
       [T_RULES]:     ['Line','Type','Value'],
       [T_SETTINGS]:  ['Key','Value'],
@@ -353,6 +357,7 @@
         case 'save-rules':           return overwriteTab_(T_RULES, body.rows || []);
         case 'save-settings':        return overwriteSettings_(body.settings || {});
         case 'chat':                 return chatWithGemini_(body.messages || [], body.context || {});
+        case 'petrol-price':         return getPetrolPriceCached_();
         default:                     return { ok: false, error: 'unknown action: ' + action };
       }
     }
@@ -1241,6 +1246,53 @@
         }
       }
       Logger.log('No PDF attachments found in Gmail (from:me, last 90 days).');
+    }
+
+    // ============================================================================
+    // PETROL PRICE — live coastal price scraped from Astron Energy.
+    // Cached in Script Properties for 6 hours so heavy use doesn't hammer the
+    // site. Returns { ok, price, asOf, source } shape.
+    // ============================================================================
+    function getPetrolPriceCached_() {
+      const props = PropertiesService.getScriptProperties();
+      const cachedRaw = props.getProperty('PETROL_PRICE_CACHE');
+      if (cachedRaw) {
+        try {
+          const cached = JSON.parse(cachedRaw);
+          const ageMs = Date.now() - (cached.fetchedAt || 0);
+          if (ageMs < 6 * 60 * 60 * 1000 && cached.price) {
+            return { ok: true, price: cached.price, asOf: cached.fetchedAt, source: 'cache' };
+          }
+        } catch (_) {}
+      }
+      try {
+        const price = getPetrolPrice_();
+        if (typeof price === 'number' && price > 0) {
+          props.setProperty('PETROL_PRICE_CACHE', JSON.stringify({ price, fetchedAt: Date.now() }));
+          return { ok: true, price, asOf: Date.now(), source: 'fresh' };
+        }
+        return { ok: false, error: 'price not found in Astron page' };
+      } catch (e) {
+        return { ok: false, error: String(e) };
+      }
+    }
+
+    // Fetches the coastal petrol price from Astron Energy. Returns a number
+    // like 23.45 (R/L) or null if not found. Brittle by nature — Astron can
+    // change their HTML anytime. Caller is responsible for caching.
+    function getPetrolPrice_() {
+      const url = 'https://www.astronenergy.co.za/';
+      const resp = UrlFetchApp.fetch(url, {
+        muteHttpExceptions: true,
+        headers: { 'User-Agent': 'Mozilla/5.0 (AppsScript)' },
+      });
+      const html = resp.getContentText();
+      const sectionMatch = html.match(/<section[^>]*class="desktop-prices[\s\S]*?<\/section>/i);
+      const chunk = sectionMatch ? sectionMatch[0] : html;
+      const re = /<div[^>]*class="[^"]*\bprice-coastal-col\b[^"]*"[^>]*>[\s\S]*?<div[^>]*class="[^"]*\bitem-price-col\b[^"]*"[^>]*>[\s\S]*?<p>\s*R\s*([0-9]+(?:[.,][0-9]{1,2})?)\s*<\/p>/i;
+      const m = chunk.match(re);
+      if (m && m[1]) return parseFloat(m[1].replace(',', '.'));
+      return null;
     }
 
     // ============================================================================
