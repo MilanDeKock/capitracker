@@ -314,24 +314,19 @@
       }
       const action = params.action || 'load';
       try {
-        // Reads / data pulls
+        // Reads / data pulls — handled inline because they don't need a body.
         if (action === 'load') return jsonOut_(loadAll_());
         if (action === 'pull')     { pullStatements_('all'); return jsonOut_(loadAll_()); }
         if (action === 'pull-csv') { pullStatements_('csv'); return jsonOut_(loadAll_()); }
         if (action === 'pull-pdf') { pullStatements_('pdf'); return jsonOut_(loadAll_()); }
         if (action === 'ping') return jsonOut_({ ok: true, message: 'pong' });
 
-        // State-changing actions via GET — added because Apps Script's
-        // POST → 302 redirect → googleusercontent chain is unreliable in
-        // multi-Google-account browsers. The same action via GET goes
-        // through the redirect cleanly. params.body is a URL-encoded JSON
-        // string with the action's normal body shape.
-        if (params.body) {
-          const body = JSON.parse(params.body);
-          return jsonOut_(handleAction_(action, body));
-        }
-
-        return jsonOut_({ ok: false, error: 'unknown action: ' + action });
+        // Everything else routes through the shared dispatcher. State-changing
+        // actions arrive with a body= query param (URL-encoded JSON); read-only
+        // actions that don't need input (petrol-price, find-pending-merges)
+        // arrive without a body. handleAction_ handles both via destructuring.
+        const body = params.body ? JSON.parse(params.body) : {};
+        return jsonOut_(handleAction_(action, body));
       } catch (err) {
         return jsonOut_({ ok: false, error: String(err) });
       }
