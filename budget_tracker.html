@@ -1041,7 +1041,7 @@ function BudgetTracker() {
       if (o.cycle === cycleStartISO) overrideMap[o.line] = o.amount;
     }
     const result = budget.map(b => ({
-      line: b.line,
+      ...b,  // preserve forecast, l100, kmPerDay etc — only Amount can be overridden per cycle
       amount: overrideMap[b.line] !== undefined ? overrideMap[b.line] : b.amount,
       overridden: overrideMap[b.line] !== undefined,
     }));
@@ -1643,7 +1643,7 @@ function Dashboard({ budget: defaultBudget, budgetOverrides, effectiveBudgetForC
   // Pull live coastal petrol price once per session when the user opens any
   // petrol-forecast line. Cached server-side for 6h, so this only really
   // hits Astron a few times a day across all users.
-  React.useEffect(() => {
+  useEffect(() => {
     if (!expandedBudgetLine || !onFetchPetrolPrice) return;
     const exp = budget.find(b => b.line === expandedBudgetLine);
     if (!exp || exp.forecast !== 'petrol' || petrolPrice || petrolError) return;
