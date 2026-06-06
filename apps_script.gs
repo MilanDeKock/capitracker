@@ -347,6 +347,7 @@
         case 'merge-two-rows':       return mergeTwoRows_(body.pending, body.cleared);
         case 'add-hidden-hash':      return addHiddenHashServer_(body.hash);
         case 'remove-hidden-hash':   return removeHiddenHashServer_(body.hash);
+        case 'purge-row':            return purgeRow_(body);
         case 'save-budget':          return overwriteTab_(T_BUDGET, body.rows || []);
         case 'save-budget-overrides':return overwriteTab_(T_OVERRIDES, body.rows || []);
         case 'save-rules':           return overwriteTab_(T_RULES, body.rows || []);
@@ -492,6 +493,84 @@
       const set = getHiddenHashes_();
       set.delete(String(hash));
       return writeHiddenHashes_(set);
+    }
+
+    // Full-spectrum row removal — the nuclear option for a row the user has
+    // explicitly chosen to get rid of (via merge or delete). Hits all three
+    // surfaces so the row can't sneak back:
+    //   1. Deletes any matching row from Transactions (history)
+    //   2. Deletes any matching row from Bank Statement (raw)
+    //   3. Adds the hash to HiddenHashes so future syncs skip it
+    //
+    // Matching is forgiving: amount + (transactionDate || postingDate) +
+    // normalized description. Caters for Capitec's pending→cleared rewrites
+    // where punctuation/spacing shifts but the underlying tx is the same.
+    //
+    // body shape: { hash, account, postingDate, transactionDate,
+    //               originalDescription, description, amount }
+    function purgeRow_(body) {
+      if (!body) return { ok: false, error: 'no body' };
+      const ss = SpreadsheetApp.getActiveSpreadsheet();
+      const tz = Session.getScriptTimeZone();
+
+      const targetDate   = String(body.transactionDate || body.postingDate || '');
+      const targetDesc   = normalizeDesc_(body.originalDescription || body.description);
+      const targetAmount = Number(body.amount || 0).toFixed(2);
+      const targetAcc    = String(body.account || '').trim();
+
+      const rowMatches = (data, headers, rowIdx) => {
+        const pdCol = headers.indexOf('Posting Date');
+        const tdCol = headers.indexOf('Transaction Date');
+        const odCol = headers.indexOf('Original Description');
+        const dCol  = headers.indexOf('Description');
+        const miCol = headers.indexOf('Money In');
+        const moCol = headers.indexOf('Money Out');
+        const feCol = headers.indexOf('Fee');
+        const accCol = headers.indexOf('Account');
+        const fmtDate = v => {
+          if (v instanceof Date) return Utilities.formatDate(v, tz, 'yyyy-MM-dd');
+          return String(v || '').slice(0, 10);
+        };
+        const pd  = pdCol >= 0 ? fmtDate(data[rowIdx][pdCol]) : '';
+        const td  = tdCol >= 0 ? fmtDate(data[rowIdx][tdCol]) : '';
+        const rowDesc = normalizeDesc_(data[rowIdx][odCol] || data[rowIdx][dCol]);
+        const mi = Number(data[rowIdx][miCol]) || 0;
+        const mo = Number(data[rowIdx][moCol]) || 0;
+        const fe = Number(data[rowIdx][feCol]) || 0;
+        const rowAmt = (mi + mo + fe).toFixed(2);
+        const rowAcc = accCol >= 0 ? String(data[rowIdx][accCol] || '').trim() : '';
+        const dateOk = (td === targetDate) || (pd === targetDate);
+        const accOk = !targetAcc || !rowAcc || rowAcc === targetAcc;
+        return dateOk && rowDesc === targetDesc && rowAmt === targetAmount && accOk;
+      };
+
+      const deleteMatches = (sheetName) => {
+        const sheet = ss.getSheetByName(sheetName);
+        if (!sheet) return 0;
+        const data = sheet.getDataRange().getValues();
+        if (data.length < 2) return 0;
+        const headers = data[0].map(String);
+        let deleted = 0;
+        for (let r = data.length - 1; r >= 1; r--) {
+          if (rowMatches(data, headers, r)) {
+            sheet.deleteRow(r + 1);
+            deleted++;
+          }
+        }
+        return deleted;
+      };
+
+      const fromHistory = deleteMatches(T_HISTORY);
+      const fromRaw     = deleteMatches(T_RAW);
+
+      // Persist a hide entry so a future CSV sync skips a re-imported copy.
+      if (body.hash) {
+        const set = getHiddenHashes_();
+        set.add(String(body.hash));
+        writeHiddenHashes_(set);
+      }
+
+      return { ok: true, fromHistory, fromRaw };
     }
 
     // ============================================================================

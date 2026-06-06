@@ -715,21 +715,26 @@ function BudgetTracker() {
     // Same functional-setState reason as handleEditHistoryLine — bulk deletes
     // need each call to see the previous call's filter result.
     setHistory(h => h.filter(t => txHash(t) !== hash));
-    // Send both hash (legacy) AND raw match fields. The server prefers match
-    // when present — it's more robust than hash across client/server version
-    // drift. tx may be undefined for older callers; in that case the server
-    // falls back to hash matching.
-    const body = { action: 'delete-history', hash };
-    if (tx) {
-      body.match = {
-        postingDate:         tx.date,
-        originalDescription: tx.originalDesc || tx.description,
-        amount:              tx.amount,
-      };
-    }
+    // Use the nuclear purge: removes from Transactions AND Bank Statement
+    // AND adds to HiddenHashes so a future CSV sync skips it. Without the
+    // Bank-Statement delete, the row reappears as 'new' on the next render.
     try {
-      await sheetFetch(config, null, body);
-      setSyncStatus({ kind: 'ok', message: 'Removed from history.', when: new Date() });
+      await sheetFetch(config, null, {
+        action:              'purge-row',
+        hash,
+        account:             tx ? tx.account : undefined,
+        postingDate:         tx ? tx.date : undefined,
+        transactionDate:     tx ? (tx.transactionDate || tx.date) : undefined,
+        originalDescription: tx ? (tx.originalDesc || tx.description) : undefined,
+        description:         tx ? tx.description : undefined,
+        amount:              tx ? tx.amount : undefined,
+      });
+      _setHiddenHashes(prev => {
+        const next = new Set(prev); next.add(hash);
+        saveLS(K.hiddenHashes, Array.from(next));
+        return next;
+      });
+      setSyncStatus({ kind: 'ok', message: 'Removed from history and bank statement.', when: new Date() });
     } catch (e) {
       setSyncStatus({ kind: 'err', message: 'Delete failed: ' + (e.message || String(e)), when: new Date() });
     }
@@ -816,27 +821,27 @@ function BudgetTracker() {
       //   - in Bank Statement only (not yet posted): already hidden locally
       //     above. The raw row stays in the Sheet (next sync would re-fetch
       //     it anyway), but it stops counting toward your budget.
-      if (loser.inHistory) {
-        console.log('[merge] sending delete-history for loser', loser.hash);
-        const delRes = await sheetFetch(config, null, {
-          action: 'delete-history',
-          hash: loser.hash,
-          match: {
-            postingDate:         loser.date,
-            originalDescription: loser.originalDesc || loser.description,
-            description:         loser.description,
-            amount:              loser.amount,
-          },
-        });
-        console.log('[merge] delete-history result:', delRes);
-        // Also persist a hide for the loser hash — protects against the
-        // row being re-imported via a future CSV/PDF sync.
-        console.log('[merge] persisting hidden hash to server for safety', loser.hash);
-        await addHiddenHash(loser.hash);
-      } else {
-        console.log('[merge] persisting hidden hash to server (raw row)', loser.hash);
-        await addHiddenHash(loser.hash);
-      }
+      // Nuclear purge: delete the loser from Transactions AND Bank Statement
+      // AND add the hash to the hidden list — one server call, all three
+      // surfaces hit so the row can't come back from any of them.
+      console.log('[merge] purging loser from history + bank statement', loser.hash);
+      const purgeRes = await sheetFetch(config, null, {
+        action:              'purge-row',
+        hash:                loser.hash,
+        account:             loser.account,
+        postingDate:         loser.date,
+        transactionDate:     loser.transactionDate || loser.date,
+        originalDescription: loser.originalDesc || loser.description,
+        description:         loser.description,
+        amount:              loser.amount,
+      });
+      console.log('[merge] purge-row result:', purgeRes);
+      // Refresh local hiddenHashes cache to match server state.
+      _setHiddenHashes(prev => {
+        const next = new Set(prev); next.add(loser.hash);
+        saveLS(K.hiddenHashes, Array.from(next));
+        return next;
+      });
 
       // Blow away the localStorage snapshot cache so the upcoming
       // loadFromSheet definitely overwrites it with fresh server data —
