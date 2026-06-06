@@ -924,11 +924,18 @@
       return { ok: true, merged: 1 };
     }
 
-    // Strip transient bank markers (e.g. Capitec's "(Pending)" prefix on
-    // un-cleared rows) so the same transaction hashes the same whether it
-    // was imported as pending or after it cleared.
+    // Strip transient bank markers AND collapse non-alphanumeric characters
+    // so the same transaction hashes the same even when Capitec subtly
+    // rewrites the description between pending and cleared. Examples:
+    //   "(Pending) Bootlegger Vredehoek - Cape Town  ZA"
+    //   "Bootlegger Vredehoek   Cape Town    ZA"
+    // Both normalize to "bootlegger vredehoek cape town za".
     function normalizeDesc_(s) {
-      return String(s || '').toLowerCase().replace(/^\s*\(pending\)\s*/i, '').trim();
+      return String(s || '')
+        .toLowerCase()
+        .replace(/^\s*\(pending\)\s*/i, '')
+        .replace(/[^a-z0-9]+/g, ' ')
+        .trim();
     }
 
     // True if a description marks the row as still-pending.

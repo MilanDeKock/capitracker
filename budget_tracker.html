@@ -238,12 +238,16 @@ function denormalizeRow(t) {
     'Budget Date': t.budgetDate || '',
   };
 }
-// Strip transient bank markers (e.g. Capitec's "(Pending)" prefix on
-// un-cleared rows) so the same transaction hashes the same whether it
-// was imported as pending or after it cleared. Without this, the same
-// purchase imported twice — once pending, once posted — would dedup as
-// two separate rows.
-const normalizeDesc = s => String(s || '').toLowerCase().replace(/^\s*\(pending\)\s*/i, '').trim();
+// Strip transient bank markers AND collapse non-alphanumeric characters so
+// subtle Capitec rewrites (extra spaces, dashes added/removed) between the
+// pending and cleared versions of a row don't produce different hashes.
+// Without this, the same purchase imported pending then cleared would dedup
+// as two separate rows even when the user has explicitly merged one away.
+const normalizeDesc = s => String(s || '')
+  .toLowerCase()
+  .replace(/^\s*\(pending\)\s*/i, '')
+  .replace(/[^a-z0-9]+/g, ' ')
+  .trim();
 // Anchor the hash on Transaction Date — it's stable across pending → cleared.
 // Capitec shifts Posting Date when a pending row clears, but Transaction Date
 // stays put, so hashing by Transaction Date keeps the same purchase looking
