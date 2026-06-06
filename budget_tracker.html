@@ -714,7 +714,11 @@ function BudgetTracker() {
   async function handleDeleteHistoryRow(hash, tx) {
     // Same functional-setState reason as handleEditHistoryLine — bulk deletes
     // need each call to see the previous call's filter result.
+    // Drop from ALL three state buckets so the row can't surface from raw
+    // or csv after the history filter removes it.
     setHistory(h => h.filter(t => txHash(t) !== hash));
+    setRawStatements(r => r.filter(t => txHash(t) !== hash));
+    setCsvRows(c => c.filter(t => txHash(t) !== hash));
     // Use the nuclear purge: removes from Transactions AND Bank Statement
     // AND adds to HiddenHashes so a future CSV sync skips it. Without the
     // Bank-Statement delete, the row reappears as 'new' on the next render.
@@ -792,12 +796,15 @@ function BudgetTracker() {
       return;
     }
 
-    // Optimistic UI: drop loser from local state immediately so the user
-    // sees the change before the round-trip to the Sheet completes. The
-    // loadFromSheet() at the end will reconcile against canonical data.
-    if (loser.inHistory) {
-      setHistory(h => h.filter(t => txHash(t) !== loser.hash));
-    }
+    // Optimistic UI: drop loser from EVERY local state bucket immediately
+    // so the user sees the change without waiting for loadFromSheet to
+    // round-trip. history, rawStatements, csvRows are the three sources
+    // that feed the merged view — miss one and the row appears to "come
+    // back" because the merged-view filter brings it through whichever
+    // bucket still has it.
+    setHistory(h => h.filter(t => txHash(t) !== loser.hash));
+    setRawStatements(r => r.filter(t => txHash(t) !== loser.hash));
+    setCsvRows(c => c.filter(t => txHash(t) !== loser.hash));
     setSyncStatus({ kind: 'ok', message: 'Merging — syncing with Sheet…', when: new Date() });
 
     try {
