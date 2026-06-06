@@ -1232,21 +1232,55 @@
 
     function buildChatSystemPrompt_(ctx) {
       const lines = [];
+      const isWhatsApp = ctx.channel === 'whatsapp';
+      const isTelegram = ctx.channel === 'telegram';
+
       lines.push("You are CapiTracker's friendly budget assistant. The user banks in South Africa and is asking questions about their personal budget.");
       lines.push("");
+
+      if (isWhatsApp) {
+        lines.push("FORMATTING (this reply is sent over WhatsApp):");
+        lines.push("- Use *single asterisks* for bold. Do NOT use **double asterisks** — WhatsApp shows them literally.");
+        lines.push("- Use _underscores_ for italics.");
+        lines.push("- No markdown # headers — WhatsApp ignores them. Use bold lines instead.");
+        lines.push("- Break information across lines generously; WhatsApp renders \\n properly.");
+        lines.push("- A relevant emoji or two adds clarity — 💸 spend, ✅ on track, ⚠️ over, 🛒 groceries, ⛽ petrol, 🍴 eating out, 🏠 rent.");
+        lines.push("- Keep replies SHORT — 3-8 lines max unless the user explicitly asks for detail.");
+        lines.push("- Format ZAR amounts as R1 234 (en-ZA thousands separator, no decimals unless precision matters).");
+        lines.push("");
+      } else if (isTelegram) {
+        lines.push("FORMATTING (this reply is sent over Telegram with parse_mode=Markdown):");
+        lines.push("- Use *single asterisks* for bold.");
+        lines.push("- Use _underscores_ for italics.");
+        lines.push("- Keep replies short; use line breaks generously.");
+        lines.push("- Format ZAR amounts as R1 234 (en-ZA thousands separator).");
+        lines.push("");
+      } else {
+        lines.push("STYLE:");
+        lines.push("- Be concise. Use ZAR formatting (R1 234,56 with en-ZA locale).");
+        lines.push("- Answer specifically with numbers when you can.");
+        lines.push("- Say 'I don't have that info' rather than guessing.");
+        lines.push("");
+      }
+
       lines.push("SCOPE RULES (important):");
       lines.push("- The user picks a SCOPE for the chat (e.g. 'This cycle', 'Last 30 days', 'Last 90 days', 'All history'). Only transactions in that scope are provided in this prompt.");
       lines.push("- Treat 'now', 'so far', 'this month' as referring to the current scope.");
       lines.push("- If the user explicitly asks about a period outside the current scope, say plainly: 'My current scope is <scope> (<dates>). Change the chat scope dropdown at the top of the chat and ask me again, and I'll have that data.'");
       lines.push("- Never invent numbers for periods outside the scope. Always work from the data below.");
       lines.push("");
-      lines.push("STYLE:");
-      lines.push("- Be concise. Use ZAR formatting (R1 234,56 with en-ZA locale).");
-      lines.push("- Answer specifically with numbers when you can.");
-      lines.push("- Say 'I don't have that info' rather than guessing.");
-      lines.push("");
 
-      if (ctx.budget && ctx.budget.length) {
+      // Pre-computed per-line totals are ALWAYS the source of truth when present.
+      // They already apply per-cycle overrides, splits, and Budget Date overrides
+      // — matching exactly what the user sees on the in-app Dashboard.
+      if (ctx.lineSummary && ctx.lineSummary.length) {
+        lines.push("BUDGET LINES (this cycle) — use these numbers VERBATIM. Do NOT recompute them from the transactions below.");
+        lines.push("Format: line | budget | spent | left  (all in ZAR)");
+        for (const s of ctx.lineSummary) {
+          lines.push('- ' + s.line + ' | R' + s.budget + ' | R' + s.spent + ' | R' + s.left);
+        }
+        lines.push('');
+      } else if (ctx.budget && ctx.budget.length) {
         lines.push('BUDGET (per pay cycle):');
         for (const b of ctx.budget) lines.push('- ' + b.line + ': R' + b.amount);
         lines.push('');
@@ -1479,6 +1513,7 @@
 
         // Build the same context the in-app chat uses, then ask Gemini.
         const ctx = buildBudgetContextForChat_();
+        ctx.channel = 'telegram';
         const result = chatWithGemini_([{ role: 'user', text: text }], ctx);
         const reply = (result && result.message) || 'Sorry, I had trouble answering that.';
 
@@ -1562,6 +1597,7 @@
         }
 
         const ctx = buildBudgetContextForChat_();
+        ctx.channel = 'whatsapp';
         const result = chatWithGemini_([{ role: 'user', text: text }], ctx);
         const reply = (result && result.message) || 'Sorry, I had trouble answering that.';
 
@@ -1591,18 +1627,20 @@
       });
     }
 
-    // Computes the current pay cycle from the Anchor Day setting, then
-    // assembles { budget, settings, scope, transactions } in the shape
-    // chatWithGemini_ / buildChatSystemPrompt_ expect.
+    // Computes the current pay cycle from the Anchor Day setting and
+    // pre-computes a per-line { budget, spent, left } summary so the AI
+    // doesn't have to re-derive these (and get them wrong) from raw
+    // transactions. Same math the in-app Dashboard does:
+    //   - effective date = Budget Date override if set, else Posting Date
+    //   - splits override single Line
+    //   - amount sign convention: negative = spend, positive = income
+    //   - overrides for THIS cycle replace the default budget amount
     function buildBudgetContextForChat_() {
       const settings = readSettings_();
       const anchorDay = Number(settings['Anchor Day']) || 25;
       const tz = Session.getScriptTimeZone();
       const today = new Date();
-      const todayISO = Utilities.formatDate(today, tz, 'yyyy-MM-dd');
 
-      // Find the cycle start day. If today's day-of-month >= anchorDay,
-      // cycle started this month; otherwise it started last month.
       const day = today.getDate();
       const cycleStartMonth = day >= anchorDay ? today.getMonth() : today.getMonth() - 1;
       const cycleStartDate = new Date(today.getFullYear(), cycleStartMonth, anchorDay);
@@ -1610,29 +1648,104 @@
       const cycleStart = Utilities.formatDate(cycleStartDate, tz, 'yyyy-MM-dd');
       const cycleEnd   = Utilities.formatDate(cycleEndDate,   tz, 'yyyy-MM-dd');
 
-      const budgetRows = readTab_(T_BUDGET).map(r => ({
+      // Effective budget per line (default amount, overridden for this cycle).
+      const budgetDefaults = readTab_(T_BUDGET).map(r => ({
         line: String(r.Line || ''), amount: Number(r.Amount) || 0,
       })).filter(b => b.line);
+      const overrideRows = readTab_(T_OVERRIDES);
+      const overrideMap = {};
+      for (const o of overrideRows) {
+        const cy = String(o.Cycle || '').slice(0, 10);
+        if (cy === cycleStart) overrideMap[String(o.Line || '')] = Number(o.Amount) || 0;
+      }
+      const effectiveBudget = budgetDefaults.map(b => ({
+        line: b.line,
+        amount: overrideMap[b.line] !== undefined ? overrideMap[b.line] : b.amount,
+        overridden: overrideMap[b.line] !== undefined,
+      }));
+      // One-off override-only lines (e.g. "Mission Trip" added just for this cycle).
+      const defaultLineNames = new Set(budgetDefaults.map(b => b.line));
+      for (const line of Object.keys(overrideMap)) {
+        if (!defaultLineNames.has(line) && line) {
+          effectiveBudget.push({ line, amount: overrideMap[line], overridden: true, addedOnly: true });
+        }
+      }
 
-      const historyRows = readTab_(T_HISTORY).filter(t => {
-        const d = String(t['Posting Date'] || '').slice(0, 10);
-        return d >= cycleStart && d <= cycleEnd;
-      });
-
-      const txs = historyRows.slice(0, 200).map(t => {
+      // Walk Transactions and sum spent per line for this cycle.
+      const historyRows = readTab_(T_HISTORY);
+      const spent = {};
+      const txsInCycle = [];
+      const fmtDate = v => {
+        if (v instanceof Date) return Utilities.formatDate(v, tz, 'yyyy-MM-dd');
+        return String(v || '').slice(0, 10);
+      };
+      for (const t of historyRows) {
+        const effDate = fmtDate(t['Budget Date']) || fmtDate(t['Posting Date']);
+        if (!effDate || effDate < cycleStart || effDate > cycleEnd) continue;
         const mi = Number(t['Money In']) || 0;
         const mo = Number(t['Money Out']) || 0;
         const fe = Number(t['Fee']) || 0;
-        return {
-          date: String(t['Posting Date'] || '').slice(0, 10),
+        const amount = mi + mo + fe;
+        if (!amount) continue;
+        const sign = amount < 0 ? 1 : -1;
+
+        // Parse splits: "Line1:Amount1|Line2:Amount2".
+        const splits = [];
+        const splitsRaw = String(t['Splits'] || '').trim();
+        if (splitsRaw) {
+          for (const piece of splitsRaw.split('|')) {
+            const idx = piece.lastIndexOf(':');
+            if (idx < 0) continue;
+            const ln = piece.slice(0, idx).trim();
+            const amt = Math.abs(Number(piece.slice(idx + 1)));
+            if (!ln || !isFinite(amt) || amt === 0) continue;
+            splits.push({ line: ln, amount: amt });
+          }
+        }
+        if (splits.length) {
+          for (const s of splits) {
+            spent[s.line] = (spent[s.line] || 0) + sign * s.amount;
+          }
+        } else {
+          const line = String(t.Line || 'Review');
+          spent[line] = (spent[line] || 0) - amount;
+        }
+        txsInCycle.push({
+          date: effDate,
           description: String(t.Description || ''),
-          amount: mi + mo + fe,
+          amount,
           line: String(t.Line || ''),
+        });
+      }
+
+      // Round to 2dp and build the line-level summary.
+      const round2 = n => Math.round(n * 100) / 100;
+      const lineSummary = effectiveBudget.map(b => {
+        const sp = spent[b.line] || 0;
+        return {
+          line: b.line,
+          budget: round2(b.amount),
+          spent:  round2(sp),
+          left:   round2(b.amount - sp),
         };
       });
+      // Lines with spend but no budget row (e.g. a deleted budget line still
+      // tagging old txs). Show them so the user/AI can see where R is going.
+      for (const line of Object.keys(spent)) {
+        if (!line || lineSummary.find(s => s.line === line)) continue;
+        lineSummary.push({
+          line,
+          budget: 0,
+          spent: round2(spent[line]),
+          left:  round2(-spent[line]),
+        });
+      }
+
+      // Sort tx list newest-first to match the rest of the app.
+      txsInCycle.sort((a, b) => String(b.date).localeCompare(String(a.date)));
 
       return {
-        budget: budgetRows,
+        budget: effectiveBudget.map(b => ({ line: b.line, amount: b.amount })),
         settings: {
           netIncome: Number(settings['Net Income']) || 0,
           anchorDay,
@@ -1640,9 +1753,10 @@
         scopeLabel: 'current cycle',
         windowFrom: cycleStart,
         windowTo: cycleEnd,
-        transactions: txs,
-        truncated: historyRows.length > 200,
-        totalCount: historyRows.length,
+        transactions: txsInCycle.slice(0, 200),
+        truncated: txsInCycle.length > 200,
+        totalCount: txsInCycle.length,
+        lineSummary,
       };
     }
 
