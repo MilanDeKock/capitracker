@@ -309,6 +309,21 @@
     // ============================================================================
     function doGet(e) {
       const params = (e && e.parameter) || {};
+
+      // WhatsApp webhook verification handshake. Meta hits this URL once
+      // when you save the webhook in the Meta dashboard. We echo back
+      // hub.challenge IF the verify token matches what we configured.
+      // No CapiTracker token needed because Meta doesn't have it.
+      if (params['hub.mode'] === 'subscribe' && params['hub.verify_token']) {
+        const expected = PropertiesService.getScriptProperties().getProperty('WHATSAPP_VERIFY_TOKEN');
+        if (expected && params['hub.verify_token'] === expected) {
+          return ContentService.createTextOutput(params['hub.challenge'] || '')
+            .setMimeType(ContentService.MimeType.TEXT);
+        }
+        return ContentService.createTextOutput('verify token mismatch')
+          .setMimeType(ContentService.MimeType.TEXT);
+      }
+
       if (!checkToken_(params.token)) {
         return jsonOut_({ ok: false, error: 'bad token' });
       }
@@ -363,6 +378,20 @@
       try { body = JSON.parse(e && e.postData && e.postData.contents); }
       catch (_) { return jsonOut_({ ok: false, error: 'bad json' }); }
       if (!body) return jsonOut_({ ok: false, error: 'no body' });
+
+      // Telegram webhook calls don't carry our SHARED_TOKEN — they're
+      // POSTed by Telegram's servers. Detect by the Telegram update shape
+      // (presence of update_id + message) and route to the bot handler.
+      if (body.update_id && body.message) {
+        return handleTelegramUpdate_(body);
+      }
+
+      // WhatsApp Cloud API webhook. Meta POSTs message events here with
+      // object='whatsapp_business_account'. Same deal as Telegram — no
+      // CapiTracker token, auth is handled by chat-ID allowlist inside.
+      if (body.object === 'whatsapp_business_account') {
+        return handleWhatsAppUpdate_(body);
+      }
 
       if (!checkToken_(body.token)) {
         return jsonOut_({ ok: false, error: 'bad token' });
@@ -1374,6 +1403,247 @@
       const m = chunk.match(re);
       if (m && m[1]) return parseFloat(m[1].replace(',', '.'));
       return null;
+    }
+
+    // ============================================================================
+    // TELEGRAM BOT (opt-in) — chat with your budget from your phone.
+    // Sends user messages through Gemini with your current cycle's budget +
+    // transactions as context, then replies with the answer via Telegram's
+    // sendMessage API.
+    //
+    // SETUP (~5 min):
+    //   1. On Telegram, message @BotFather → /newbot → pick a name → copy the
+    //      bot token (looks like 1234567:ABC-DEF...).
+    //   2. Apps Script editor → ⚙ Project Settings → Script properties →
+    //      add: TELEGRAM_BOT_TOKEN = <your token>.
+    //   3. Save + redeploy.
+    //   4. On Telegram, find your bot and send it: /start
+    //      The bot replies with your chat ID.
+    //   5. Apps Script Script Properties → add: TELEGRAM_CHAT_ID = <that id>.
+    //      (This restricts the bot to ONLY you. Without it, anyone who finds
+    //      the bot can read your budget.)
+    //   6. Register the webhook so Telegram knows where to send messages.
+    //      In a browser, visit (substitute your token + Apps Script URL):
+    //        https://api.telegram.org/bot<TOKEN>/setWebhook?url=<APPS_SCRIPT_WEB_APP_URL>
+    //      You should see {"ok":true,"result":true,"description":"Webhook was set"}.
+    //
+    // Then on your phone you can ask things like:
+    //   "how much is left on Kos this cycle?"
+    //   "what's my biggest expense so far?"
+    //   "am I on track for groceries?"
+    // ============================================================================
+    function handleTelegramUpdate_(update) {
+      const noOp = ContentService.createTextOutput('').setMimeType(ContentService.MimeType.TEXT);
+      try {
+        const chatId = update.message && update.message.chat && update.message.chat.id;
+        const text = (update.message && update.message.text || '').trim();
+        if (!chatId || !text) return noOp;
+
+        const props = PropertiesService.getScriptProperties();
+        const botToken      = props.getProperty('TELEGRAM_BOT_TOKEN');
+        const allowedChatId = props.getProperty('TELEGRAM_CHAT_ID');
+
+        if (!botToken) {
+          Logger.log('Telegram update received but TELEGRAM_BOT_TOKEN not set');
+          return noOp;
+        }
+
+        // /start or /id — echo the chat ID so the user can authorize themselves.
+        if (text === '/start' || text === '/id') {
+          sendTelegramMessage_(botToken, chatId,
+            'Your Telegram chat ID is: `' + chatId + '`\n\n' +
+            'Add this to Apps Script → Project Settings → Script properties as ' +
+            '`TELEGRAM_CHAT_ID` to authorize this chat. ' +
+            'Then send another message to start chatting with your budget.');
+          return noOp;
+        }
+
+        // Auth gate — only respond to the configured chat.
+        if (!allowedChatId || String(chatId) !== String(allowedChatId)) {
+          sendTelegramMessage_(botToken, chatId,
+            '⛔ Not authorised. The bot owner needs to add chat id `' + chatId +
+            '` to Script Properties.');
+          return noOp;
+        }
+
+        // /help — usage hint.
+        if (text === '/help') {
+          sendTelegramMessage_(botToken, chatId,
+            'Ask me about your budget in plain English. Examples:\n' +
+            '• "how much left on Kos?"\n' +
+            '• "what did I spend most on this cycle?"\n' +
+            '• "am I on track for petrol?"\n' +
+            '• "what\'s my biggest transaction in eating out?"');
+          return noOp;
+        }
+
+        // Build the same context the in-app chat uses, then ask Gemini.
+        const ctx = buildBudgetContextForChat_();
+        const result = chatWithGemini_([{ role: 'user', text: text }], ctx);
+        const reply = (result && result.message) || 'Sorry, I had trouble answering that.';
+
+        sendTelegramMessage_(botToken, chatId, reply);
+        return noOp;
+      } catch (e) {
+        Logger.log('Telegram handler error: ' + e + '\n' + (e && e.stack));
+        return noOp;
+      }
+    }
+
+    function sendTelegramMessage_(botToken, chatId, text) {
+      const url = 'https://api.telegram.org/bot' + botToken + '/sendMessage';
+      // Telegram caps messages at 4096 chars — Gemini may go longer.
+      const safe = String(text || '').slice(0, 4000);
+      UrlFetchApp.fetch(url, {
+        method: 'post',
+        contentType: 'application/json',
+        payload: JSON.stringify({
+          chat_id: chatId,
+          text: safe,
+          parse_mode: 'Markdown',
+        }),
+        muteHttpExceptions: true,
+      });
+    }
+
+    // WhatsApp Cloud API webhook handler. Meta POSTs message events here in
+    // the shape: { object:'whatsapp_business_account', entry:[{ changes:[{
+    // value:{ messages:[{ from, text:{body} }], metadata:{phone_number_id} }
+    // }]}]}. We dig out the first text message, auth by sender's phone
+    // number against WHATSAPP_CHAT_ID, then route the same way Telegram does.
+    function handleWhatsAppUpdate_(body) {
+      const noOp = ContentService.createTextOutput('EVENT_RECEIVED').setMimeType(ContentService.MimeType.TEXT);
+      try {
+        const entry  = (body.entry && body.entry[0]) || {};
+        const change = (entry.changes && entry.changes[0]) || {};
+        const value  = change.value || {};
+        const msg    = (value.messages && value.messages[0]);
+        if (!msg || msg.type !== 'text') return noOp;
+
+        const from  = String(msg.from || '');
+        const text  = String((msg.text && msg.text.body) || '').trim();
+        if (!from || !text) return noOp;
+
+        const props        = PropertiesService.getScriptProperties();
+        const token        = props.getProperty('WHATSAPP_TOKEN');
+        const phoneId      = props.getProperty('WHATSAPP_PHONE_ID');
+        const allowedChat  = props.getProperty('WHATSAPP_CHAT_ID');
+
+        if (!token || !phoneId) {
+          Logger.log('WhatsApp message received but WHATSAPP_TOKEN or WHATSAPP_PHONE_ID not set');
+          return noOp;
+        }
+
+        // /id — echo back the sender so the owner can authorize themselves.
+        if (text === '/id' || text === '/start') {
+          sendWhatsAppMessage_(token, phoneId, from,
+            'Your WhatsApp number is: ' + from + '\n\n' +
+            'Add this to Apps Script → Project Settings → Script properties as ' +
+            'WHATSAPP_CHAT_ID to authorize this number.');
+          return noOp;
+        }
+
+        // Auth gate — only respond to the configured number.
+        if (!allowedChat || String(from) !== String(allowedChat)) {
+          sendWhatsAppMessage_(token, phoneId, from,
+            'Not authorised. The bot owner needs to add ' + from +
+            ' to Script Properties as WHATSAPP_CHAT_ID.');
+          return noOp;
+        }
+
+        if (text === '/help') {
+          sendWhatsAppMessage_(token, phoneId, from,
+            'Ask me about your budget in plain English. Examples:\n' +
+            '• "how much left on Kos?"\n' +
+            '• "what did I spend most on this cycle?"\n' +
+            '• "am I on track for petrol?"\n' +
+            '• "what\'s my biggest transaction in eating out?"');
+          return noOp;
+        }
+
+        const ctx = buildBudgetContextForChat_();
+        const result = chatWithGemini_([{ role: 'user', text: text }], ctx);
+        const reply = (result && result.message) || 'Sorry, I had trouble answering that.';
+
+        sendWhatsAppMessage_(token, phoneId, from, reply);
+        return noOp;
+      } catch (e) {
+        Logger.log('WhatsApp handler error: ' + e + '\n' + (e && e.stack));
+        return noOp;
+      }
+    }
+
+    function sendWhatsAppMessage_(token, phoneId, to, text) {
+      const url = 'https://graph.facebook.com/v18.0/' + phoneId + '/messages';
+      // WhatsApp text body caps at 4096 chars.
+      const safe = String(text || '').slice(0, 4000);
+      UrlFetchApp.fetch(url, {
+        method: 'post',
+        contentType: 'application/json',
+        headers: { Authorization: 'Bearer ' + token },
+        payload: JSON.stringify({
+          messaging_product: 'whatsapp',
+          to: String(to),
+          type: 'text',
+          text: { body: safe },
+        }),
+        muteHttpExceptions: true,
+      });
+    }
+
+    // Computes the current pay cycle from the Anchor Day setting, then
+    // assembles { budget, settings, scope, transactions } in the shape
+    // chatWithGemini_ / buildChatSystemPrompt_ expect.
+    function buildBudgetContextForChat_() {
+      const settings = readSettings_();
+      const anchorDay = Number(settings['Anchor Day']) || 25;
+      const tz = Session.getScriptTimeZone();
+      const today = new Date();
+      const todayISO = Utilities.formatDate(today, tz, 'yyyy-MM-dd');
+
+      // Find the cycle start day. If today's day-of-month >= anchorDay,
+      // cycle started this month; otherwise it started last month.
+      const day = today.getDate();
+      const cycleStartMonth = day >= anchorDay ? today.getMonth() : today.getMonth() - 1;
+      const cycleStartDate = new Date(today.getFullYear(), cycleStartMonth, anchorDay);
+      const cycleEndDate   = new Date(today.getFullYear(), cycleStartMonth + 1, anchorDay - 1);
+      const cycleStart = Utilities.formatDate(cycleStartDate, tz, 'yyyy-MM-dd');
+      const cycleEnd   = Utilities.formatDate(cycleEndDate,   tz, 'yyyy-MM-dd');
+
+      const budgetRows = readTab_(T_BUDGET).map(r => ({
+        line: String(r.Line || ''), amount: Number(r.Amount) || 0,
+      })).filter(b => b.line);
+
+      const historyRows = readTab_(T_HISTORY).filter(t => {
+        const d = String(t['Posting Date'] || '').slice(0, 10);
+        return d >= cycleStart && d <= cycleEnd;
+      });
+
+      const txs = historyRows.slice(0, 200).map(t => {
+        const mi = Number(t['Money In']) || 0;
+        const mo = Number(t['Money Out']) || 0;
+        const fe = Number(t['Fee']) || 0;
+        return {
+          date: String(t['Posting Date'] || '').slice(0, 10),
+          description: String(t.Description || ''),
+          amount: mi + mo + fe,
+          line: String(t.Line || ''),
+        };
+      });
+
+      return {
+        budget: budgetRows,
+        settings: {
+          netIncome: Number(settings['Net Income']) || 0,
+          anchorDay,
+        },
+        scopeLabel: 'current cycle',
+        windowFrom: cycleStart,
+        windowTo: cycleEnd,
+        transactions: txs,
+        truncated: historyRows.length > 200,
+        totalCount: historyRows.length,
+      };
     }
 
     // ============================================================================
