@@ -904,6 +904,9 @@ function BudgetTracker() {
         description: t.description,
         amount: Math.round(t.amount * 100) / 100,
         line: t.line,
+        // Splits override the single line for budgeting math; the chat's
+        // get_line tool needs them to mirror the dashboard's per-line totals.
+        splits: (t.splits && t.splits.length) ? t.splits.map(s => ({ line: s.line, amount: s.amount })) : undefined,
       });
       const today = new Date();
       const cutoffISO = (days) => {

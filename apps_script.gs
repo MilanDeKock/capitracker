@@ -1203,31 +1203,181 @@
         contents.push({ role, parts: [{ text }] });
       }
 
-      const body = {
-        contents,
-        generationConfig: {
-          temperature: 0.3,
-          // Gemini 2.5 Flash supports up to ~8K output tokens. 4000 covers any
-          // reasonable answer without burning quota. Was 1500 — too tight; long
-          // answers were getting chopped mid-sentence.
-          maxOutputTokens: 4000,
-        },
-      };
-
+      const tools = [{ functionDeclarations: CHAT_TOOL_DECLS }];
       const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + GEMINI_MODEL + ':generateContent?key=' + apiKey;
-      const res = geminiFetch_(url, JSON.stringify(body));
-      const data = JSON.parse(res.getContentText());
-      const cand = data.candidates && data.candidates[0];
-      let text = cand && cand.content && cand.content.parts && cand.content.parts.map(p => p.text || '').join('') || '';
-      const finish = cand && cand.finishReason;
-      // Append a clear marker if the model stopped because it hit the token cap
-      // or was blocked, rather than silently returning a half-formed answer.
-      if (finish === 'MAX_TOKENS') {
-        text += '\n\n— answer truncated at the token limit. Ask a more specific question, or "continue" to get the rest.';
-      } else if (finish === 'SAFETY' || finish === 'RECITATION' || finish === 'BLOCKLIST') {
-        text += '\n\n— Gemini stopped because of a content filter (finishReason: ' + finish + '). Try rephrasing.';
+
+      // Tool-call loop. Gemini calls get_line / find_transactions to fetch
+      // exact numbers from the precomputed table; we execute server-side,
+      // feed the result back, and let Gemini compose the prose answer.
+      // Cap at 4 round-trips to prevent runaway loops if Gemini keeps calling.
+      for (let iter = 0; iter < 4; iter++) {
+        const body = {
+          contents,
+          tools,
+          generationConfig: { temperature: 0.3, maxOutputTokens: 4000 },
+        };
+        const res = geminiFetch_(url, JSON.stringify(body));
+        const data = JSON.parse(res.getContentText());
+        const cand = data.candidates && data.candidates[0];
+        if (!cand) return { ok: true, message: '' };
+
+        const parts = (cand.content && cand.content.parts) || [];
+        const functionCalls = parts.filter(p => p.functionCall);
+
+        if (functionCalls.length) {
+          // Echo back the model's tool-call turn, then a synthetic 'user' turn
+          // containing the tool responses. Loop. Gemini will then either call
+          // another tool or produce the final text reply.
+          contents.push({ role: 'model', parts });
+          const responseParts = functionCalls.map(p => ({
+            functionResponse: {
+              name: p.functionCall.name,
+              response: executeChatTool_(p.functionCall.name, p.functionCall.args || {}, context),
+            },
+          }));
+          contents.push({ role: 'user', parts: responseParts });
+          continue;
+        }
+
+        let text = parts.map(p => p.text || '').join('');
+        const finish = cand.finishReason;
+        if (finish === 'MAX_TOKENS') {
+          text += '\n\n— answer truncated at the token limit. Ask a more specific question, or "continue" to get the rest.';
+        } else if (finish === 'SAFETY' || finish === 'RECITATION' || finish === 'BLOCKLIST') {
+          text += '\n\n— Gemini stopped because of a content filter (finishReason: ' + finish + '). Try rephrasing.';
+        }
+        return { ok: true, message: text };
       }
-      return { ok: true, message: text };
+      return { ok: true, message: 'Sorry, I got stuck looping while answering that. Try rephrasing the question.' };
+    }
+
+    // Tool declarations exposed to Gemini. The model is INSTRUCTED in the
+    // system prompt to call get_line for any numeric budget question, so it
+    // never has to do arithmetic itself.
+    const CHAT_TOOL_DECLS = [
+      {
+        name: 'get_line',
+        description: 'Returns the exact budget, spent, and remaining amount for a budget line in the current scope. Call this for ANY question that involves how much was budgeted, spent, or left on a category — never compute these yourself. Case-insensitive; tolerates close but not exact line names.',
+        parameters: {
+          type: 'object',
+          properties: {
+            line: { type: 'string', description: 'Budget line name, e.g. "Groceries", "Eating Out", "Petrol". Case-insensitive.' },
+          },
+          required: ['line'],
+        },
+      },
+      {
+        name: 'find_transactions',
+        description: 'Returns transactions in the current scope, optionally filtered by budget line and/or description, sorted by size or recency. Call this for any "biggest", "most recent", "what did I spend at X" type question — do not eyeball it from the transactions list.',
+        parameters: {
+          type: 'object',
+          properties: {
+            line:     { type: 'string', description: 'Filter to transactions tagged to this budget line. Optional, case-insensitive substring match.' },
+            contains: { type: 'string', description: 'Filter to transactions whose description contains this substring. Optional, case-insensitive.' },
+            sort:     { type: 'string', enum: ['biggest', 'smallest', 'recent'], description: 'Ordering. Default biggest (largest absolute spend first).' },
+            limit:    { type: 'integer', description: 'Max results to return. Default 5, capped at 20.' },
+          },
+        },
+      },
+    ];
+
+    // Walks transactions + budget to produce the same {line, budget, spent, left}
+    // table that buildBudgetContextForChat_ emits. Used as a server-side fallback
+    // when the client (React app) sends context without a precomputed lineSummary.
+    // Sign convention matches the dashboard: amount<0 = spend, splits override
+    // a row's single line.
+    function deriveLineSummaryFromContext_(context) {
+      const budgetRows = (context.budget || []).map(b => ({ line: String(b.line || ''), amount: Number(b.amount) || 0 })).filter(b => b.line);
+      const spent = {};
+      for (const t of (context.transactions || [])) {
+        const amount = Number(t.amount) || 0;
+        if (!amount) continue;
+        const sign = amount < 0 ? 1 : -1;
+        const splits = Array.isArray(t.splits) ? t.splits : [];
+        if (splits.length) {
+          for (const s of splits) {
+            const ln = String(s.line || '');
+            const amt = Math.abs(Number(s.amount) || 0);
+            if (!ln || !amt) continue;
+            spent[ln] = (spent[ln] || 0) + sign * amt;
+          }
+        } else {
+          const line = String(t.line || 'Review');
+          spent[line] = (spent[line] || 0) - amount;
+        }
+      }
+      const round2 = n => Math.round(n * 100) / 100;
+      const summary = budgetRows.map(b => ({
+        line: b.line,
+        budget: round2(b.amount),
+        spent:  round2(spent[b.line] || 0),
+        left:   round2(b.amount - (spent[b.line] || 0)),
+      }));
+      for (const line of Object.keys(spent)) {
+        if (!line || summary.find(s => s.line === line)) continue;
+        summary.push({ line, budget: 0, spent: round2(spent[line]), left: round2(-spent[line]) });
+      }
+      return summary;
+    }
+
+    // Runs a tool call from Gemini against the precomputed context. Returns a
+    // plain object that Gemini receives as functionResponse.response.
+    function executeChatTool_(name, args, context) {
+      try {
+        if (name === 'get_line') {
+          const target = String(args.line || '').trim().toLowerCase();
+          if (!target) return { error: 'line is required' };
+          const summary = (context.lineSummary && context.lineSummary.length)
+            ? context.lineSummary
+            : deriveLineSummaryFromContext_(context);
+          let hit = summary.find(s => String(s.line).toLowerCase() === target);
+          if (!hit) hit = summary.find(s => String(s.line).toLowerCase().includes(target));
+          if (!hit) hit = summary.find(s => target.includes(String(s.line).toLowerCase()));
+          if (!hit) return { error: 'no budget line matches "' + args.line + '"', available_lines: summary.map(s => s.line) };
+          const budget = Number(hit.budget) || 0;
+          const pct = budget > 0 ? Math.round((Number(hit.spent) / budget) * 100) : null;
+          return {
+            line: hit.line,
+            budget,
+            spent: Number(hit.spent) || 0,
+            left:  Number(hit.left)  || 0,
+            percent_used: pct,
+            scope_from: context.windowFrom || null,
+            scope_to:   context.windowTo   || null,
+          };
+        }
+        if (name === 'find_transactions') {
+          const txs = context.transactions || [];
+          const lineFilter     = String(args.line     || '').trim().toLowerCase();
+          const containsFilter = String(args.contains || '').trim().toLowerCase();
+          const sort  = String(args.sort  || 'biggest');
+          const limit = Math.min(Math.max(Number(args.limit) || 5, 1), 20);
+          let filtered = txs.filter(t => {
+            if (lineFilter     && !String(t.line || '').toLowerCase().includes(lineFilter)) return false;
+            if (containsFilter && !String(t.description || '').toLowerCase().includes(containsFilter)) return false;
+            return true;
+          });
+          if (sort === 'biggest') {
+            filtered.sort((a, b) => Math.abs(Number(b.amount) || 0) - Math.abs(Number(a.amount) || 0));
+          } else if (sort === 'smallest') {
+            filtered.sort((a, b) => Math.abs(Number(a.amount) || 0) - Math.abs(Number(b.amount) || 0));
+          } else {
+            filtered.sort((a, b) => String(b.date).localeCompare(String(a.date)));
+          }
+          return {
+            results: filtered.slice(0, limit).map(t => ({
+              date: t.date,
+              description: t.description,
+              amount: Number(t.amount) || 0,
+              line: t.line || '',
+            })),
+            total_matched: filtered.length,
+          };
+        }
+        return { error: 'unknown tool: ' + name };
+      } catch (e) {
+        return { error: String(e) };
+      }
     }
 
     function buildChatSystemPrompt_(ctx) {
@@ -1267,22 +1417,25 @@
       lines.push("- The user picks a SCOPE for the chat (e.g. 'This cycle', 'Last 30 days', 'Last 90 days', 'All history'). Only transactions in that scope are provided in this prompt.");
       lines.push("- Treat 'now', 'so far', 'this month' as referring to the current scope.");
       lines.push("- If the user explicitly asks about a period outside the current scope, say plainly: 'My current scope is <scope> (<dates>). Change the chat scope dropdown at the top of the chat and ask me again, and I'll have that data.'");
-      lines.push("- Never invent numbers for periods outside the scope. Always work from the data below.");
+      lines.push("- Never invent numbers for periods outside the scope.");
       lines.push("");
 
-      // Pre-computed per-line totals are ALWAYS the source of truth when present.
-      // They already apply per-cycle overrides, splits, and Budget Date overrides
-      // — matching exactly what the user sees on the in-app Dashboard.
+      lines.push("TOOLS — you MUST use these for numeric answers. Do not compute or eyeball numbers from the inline data below.");
+      lines.push("- get_line(line) — call for ANY number involving budget, spent, or left on a category. Trust its output verbatim.");
+      lines.push("- find_transactions({line?, contains?, sort?, limit?}) — call for 'biggest', 'most recent', or 'what did I spend at X' questions.");
+      lines.push("If a tool returns an error with 'available_lines', pick the closest match and try again.");
+      lines.push("");
+
+      // Inline summary is kept for ORIENTATION ONLY — to help Gemini decide
+      // which tool to call. Numbers in the final answer must come from
+      // get_line, not from this table.
       if (ctx.lineSummary && ctx.lineSummary.length) {
-        lines.push("BUDGET LINES (this cycle) — use these numbers VERBATIM. Do NOT recompute them from the transactions below.");
-        lines.push("Format: line | budget | spent | left  (all in ZAR)");
-        for (const s of ctx.lineSummary) {
-          lines.push('- ' + s.line + ' | R' + s.budget + ' | R' + s.spent + ' | R' + s.left);
-        }
+        lines.push("AVAILABLE BUDGET LINES (for orientation — call get_line to cite a number):");
+        for (const s of ctx.lineSummary) lines.push('- ' + s.line);
         lines.push('');
       } else if (ctx.budget && ctx.budget.length) {
-        lines.push('BUDGET (per pay cycle):');
-        for (const b of ctx.budget) lines.push('- ' + b.line + ': R' + b.amount);
+        lines.push('BUDGET LINES (for orientation):');
+        for (const b of ctx.budget) lines.push('- ' + b.line);
         lines.push('');
       }
       if (ctx.settings) {
@@ -1296,17 +1449,13 @@
         lines.push('SCOPE: ' + scopeName + ' (all available history).');
       }
       lines.push('');
-      if (ctx.transactions && ctx.transactions.length) {
-        const hdr = 'TRANSACTIONS IN SCOPE (' + ctx.transactions.length + (ctx.truncated ? ' shown, ' + ctx.totalCount + ' total — truncated for prompt size' : '') + ', csv-like — date | description | amount | budget line):';
-        lines.push(hdr);
-        for (const t of ctx.transactions) {
-          lines.push(t.date + ' | ' + (t.description || '') + ' | ' + (t.amount || 0) + ' | ' + (t.line || ''));
-        }
-        lines.push('');
+      const txCount = (ctx.transactions && ctx.transactions.length) || 0;
+      if (txCount) {
+        lines.push('TRANSACTIONS IN SCOPE: ' + (ctx.truncated ? ctx.totalCount + ' total, ' + txCount + ' indexed' : txCount + ' total') + '. Use find_transactions to inspect them — do not ask the user to provide them.');
       } else {
-        lines.push('TRANSACTIONS IN SCOPE: none provided.');
-        lines.push('');
+        lines.push('TRANSACTIONS IN SCOPE: none.');
       }
+      lines.push('');
       return lines.join('\n');
     }
 
@@ -1753,8 +1902,9 @@
         scopeLabel: 'current cycle',
         windowFrom: cycleStart,
         windowTo: cycleEnd,
-        transactions: txsInCycle.slice(0, 200),
-        truncated: txsInCycle.length > 200,
+        // No slice — transactions aren't dumped into the prompt anymore;
+        // find_transactions filters them on demand, so it needs the full set.
+        transactions: txsInCycle,
         totalCount: txsInCycle.length,
         lineSummary,
       };
