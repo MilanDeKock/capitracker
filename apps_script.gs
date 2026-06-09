@@ -368,7 +368,8 @@
         case 'save-rules':           return overwriteTab_(T_RULES, body.rows || []);
         case 'save-settings':        return overwriteSettings_(body.settings || {});
         case 'chat':                 return chatWithGemini_(body.messages || [], body.context || {});
-        case 'petrol-price':         return getPetrolPriceCached_();
+        case 'petrol-price':         return getPetrolPriceCached_(body.grade);
+        case 'fuel-price-history':   return getFuelPriceHistoryCached_(body.grade, body.months);
         default:                     return { ok: false, error: 'unknown action: ' + action };
       }
     }
@@ -1546,36 +1547,117 @@
     // Cached in Script Properties for 6 hours so heavy use doesn't hammer the
     // site. Returns { ok, price, asOf, source } shape.
     // ============================================================================
-    function getPetrolPriceCached_() {
+    // sa-fuel-api: monthly DMRE fuel prices, manually maintained by a third
+    // party. Used as primary source — Astron scrape is fallback for when the
+    // API is stale or down. See github.com/guerillagardeningkzn-design/sa-fuel-api.
+    const SA_FUEL_API_BASE = 'https://sa-fuel-api-production.up.railway.app';
+    const FUEL_PRICES_CACHE_KEY = 'FUEL_PRICES_CACHE';
+    const FUEL_HISTORY_CACHE_KEY = 'FUEL_HISTORY_CACHE';
+
+    // Returns the current fuel price for the requested grade, with smart
+    // fallback. Cached 6h. Grades: 'p95Coastal' (default), 'p95Inland',
+    // 'p93Inland', plus whatever diesel keys the API exposes.
+    //
+    // Resolution order:
+    //   1. 6h cache hit → return cached value for grade.
+    //   2. sa-fuel-api /v1/prices/latest → if its reported month is the
+    //      current month or later, cache the whole record + return.
+    //   3. If grade is p95Coastal AND API is stale/down, scrape Astron.
+    //   4. Last cached value with source='stale-cache' (could be days old).
+    function getPetrolPriceCached_(grade) {
+      grade = grade || 'p95Coastal';
       const props = PropertiesService.getScriptProperties();
-      const cachedRaw = props.getProperty('PETROL_PRICE_CACHE');
-      if (cachedRaw) {
+      const cachedRaw = props.getProperty(FUEL_PRICES_CACHE_KEY);
+      let cached = null;
+      if (cachedRaw) { try { cached = JSON.parse(cachedRaw); } catch (_) {} }
+
+      // 1. Fresh cache
+      if (cached && cached.fetchedAt && (Date.now() - cached.fetchedAt) < 6 * 60 * 60 * 1000) {
+        const price = cached.prices && cached.prices[grade];
+        if (price) return { ok: true, price, asOf: cached.fetchedAt, source: 'cache', month: cached.month, grade };
+      }
+
+      // 2. sa-fuel-api
+      const currentMonth = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM');
+      try {
+        const api = getFuelPricesFromAPI_();
+        // The API's `month` is the period the prices apply to. Treat it as
+        // current if it's the current month or later (sometimes prices are
+        // posted a few days before they take effect).
+        if (api && api.month && api.prices && String(api.month) >= currentMonth) {
+          const fresh = { month: api.month, prices: api.prices, fetchedAt: Date.now(), source: 'api' };
+          props.setProperty(FUEL_PRICES_CACHE_KEY, JSON.stringify(fresh));
+          const price = api.prices[grade];
+          if (price) return { ok: true, price, asOf: fresh.fetchedAt, source: 'api', month: api.month, grade };
+        }
+      } catch (_) {}
+
+      // 3. Astron fallback (coastal 95 only — Astron doesn't expose other grades)
+      if (grade === 'p95Coastal') {
         try {
-          const cached = JSON.parse(cachedRaw);
-          const ageMs = Date.now() - (cached.fetchedAt || 0);
-          if (ageMs < 6 * 60 * 60 * 1000 && cached.price) {
-            return { ok: true, price: cached.price, asOf: cached.fetchedAt, source: 'cache' };
+          const astronPrice = getCoastal95FromAstron_();
+          if (astronPrice && astronPrice > 0) {
+            // Merge so other grades in the cache aren't wiped.
+            const next = cached || { prices: {} };
+            next.prices = next.prices || {};
+            next.prices.p95Coastal = astronPrice;
+            next.fetchedAt = Date.now();
+            next.source = 'astron';
+            next.month = next.month || currentMonth;
+            props.setProperty(FUEL_PRICES_CACHE_KEY, JSON.stringify(next));
+            return { ok: true, price: astronPrice, asOf: next.fetchedAt, source: 'astron', month: next.month, grade };
           }
         } catch (_) {}
       }
-      try {
-        const price = getPetrolPrice_();
-        if (typeof price === 'number' && price > 0) {
-          props.setProperty('PETROL_PRICE_CACHE', JSON.stringify({ price, fetchedAt: Date.now() }));
-          return { ok: true, price, asOf: Date.now(), source: 'fresh' };
-        }
-        return { ok: false, error: 'price not found in Astron page' };
-      } catch (e) {
-        return { ok: false, error: String(e) };
+
+      // 4. Stale cache last resort
+      if (cached && cached.prices && cached.prices[grade]) {
+        return { ok: true, price: cached.prices[grade], asOf: cached.fetchedAt, source: 'stale-cache', month: cached.month, grade };
       }
+
+      return { ok: false, error: 'no fuel price source available for grade ' + grade, grade };
     }
 
-    // Fetches the coastal petrol price from Astron Energy. Returns a number
-    // like 23.45 (R/L) or null if not found. Brittle by nature — Astron can
-    // change their HTML anytime. Caller is responsible for caching.
-    function getPetrolPrice_() {
-      const url = 'https://www.astronenergy.co.za/';
-      const resp = UrlFetchApp.fetch(url, {
+    // GET /v1/prices/latest → {month, prices: {grade -> R/L}} or null.
+    function getFuelPricesFromAPI_() {
+      const resp = UrlFetchApp.fetch(SA_FUEL_API_BASE + '/v1/prices/latest', {
+        muteHttpExceptions: true,
+        headers: { 'User-Agent': 'CapiTracker/1.0' },
+      });
+      if (resp.getResponseCode() !== 200) return null;
+      const data = JSON.parse(resp.getContentText());
+      return normalizeFuelApiRecord_(data && (data.data || data));
+    }
+
+    // Flattens whatever shape the API returns into {month, prices: {grade: R/L}}.
+    // The agent that surveyed the API reported nested groups like
+    // prices.petrol.p95Coastal and prices.diesel.dieselWholesale, but older
+    // revisions may inline grades directly under `prices`. Handle both.
+    function normalizeFuelApiRecord_(rec) {
+      if (!rec || typeof rec !== 'object') return null;
+      const month = String(rec.month || '');
+      const groups = rec.prices || {};
+      const flat = {};
+      for (const v of Object.values(groups)) {
+        if (v && typeof v === 'object') {
+          for (const k in v) {
+            const n = Number(v[k]);
+            if (isFinite(n) && n > 0) flat[k] = n;
+          }
+        }
+      }
+      for (const k in groups) {
+        const n = Number(groups[k]);
+        if (isFinite(n) && n > 0) flat[k] = n;
+      }
+      if (!month || !Object.keys(flat).length) return null;
+      return { month, prices: flat };
+    }
+
+    // Astron Energy homepage scrape — coastal 95 fallback only.
+    // Brittle by nature; Astron can change their HTML anytime.
+    function getCoastal95FromAstron_() {
+      const resp = UrlFetchApp.fetch('https://www.astronenergy.co.za/', {
         muteHttpExceptions: true,
         headers: { 'User-Agent': 'Mozilla/5.0 (AppsScript)' },
       });
@@ -1586,6 +1668,59 @@
       const m = chunk.match(re);
       if (m && m[1]) return parseFloat(m[1].replace(',', '.'));
       return null;
+    }
+
+    // Last N months of fuel prices for `grade`, for the sparkline. Cached 24h
+    // because monthly DMRE prices don't change intra-month. Returns
+    // {ok, grade, months: [{month, price}], asOf, source}.
+    function getFuelPriceHistoryCached_(grade, monthsBack) {
+      grade = grade || 'p95Coastal';
+      monthsBack = Math.min(Math.max(Number(monthsBack) || 12, 1), 36);
+      const props = PropertiesService.getScriptProperties();
+      const cachedRaw = props.getProperty(FUEL_HISTORY_CACHE_KEY);
+      let cached = null;
+      if (cachedRaw) { try { cached = JSON.parse(cachedRaw); } catch (_) {} }
+
+      const slicePeak = list => list.slice(-monthsBack).map(m => ({
+        month: m.month,
+        price: m.prices && m.prices[grade] || null,
+      })).filter(m => m.price != null);
+
+      if (cached && cached.fetchedAt && (Date.now() - cached.fetchedAt) < 24 * 60 * 60 * 1000) {
+        const sliced = slicePeak(cached.months || []);
+        if (sliced.length) return { ok: true, grade, months: sliced, asOf: cached.fetchedAt, source: 'cache' };
+      }
+
+      try {
+        // Always fetch a wide range (36 months) so the same cache backs any
+        // sparkline length the UI might request later.
+        const tz = Session.getScriptTimeZone();
+        const today = new Date();
+        const from = new Date(today.getFullYear(), today.getMonth() - 36, 1);
+        const fromMonth = Utilities.formatDate(from, tz, 'yyyy-MM');
+        const toMonth   = Utilities.formatDate(today, tz, 'yyyy-MM');
+        const url = SA_FUEL_API_BASE + '/v1/prices/range?from=' + fromMonth + '&to=' + toMonth;
+        const resp = UrlFetchApp.fetch(url, {
+          muteHttpExceptions: true,
+          headers: { 'User-Agent': 'CapiTracker/1.0' },
+        });
+        if (resp.getResponseCode() !== 200) throw new Error('history HTTP ' + resp.getResponseCode());
+        const data = JSON.parse(resp.getContentText());
+        const raw = (data && (data.data || data)) || [];
+        const list = (Array.isArray(raw) ? raw : (raw.records || raw.results || []))
+          .map(normalizeFuelApiRecord_)
+          .filter(Boolean);
+        list.sort((a, b) => String(a.month).localeCompare(String(b.month)));
+        const next = { fetchedAt: Date.now(), months: list };
+        props.setProperty(FUEL_HISTORY_CACHE_KEY, JSON.stringify(next));
+        return { ok: true, grade, months: slicePeak(list), asOf: next.fetchedAt, source: 'api' };
+      } catch (e) {
+        if (cached && cached.months) {
+          const sliced = slicePeak(cached.months);
+          if (sliced.length) return { ok: true, grade, months: sliced, asOf: cached.fetchedAt, source: 'stale-cache' };
+        }
+        return { ok: false, error: String(e), grade };
+      }
     }
 
     // ============================================================================

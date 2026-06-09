@@ -328,7 +328,7 @@ function BudgetTracker() {
   const [budget, setBudget]               = useState(cached.budget         || []);
   const [budgetOverrides, setBudgetOverrides] = useState(cached.budgetOverrides || []);
   const [rules, setRules]                 = useState(cached.rules          || []);
-  const [settings, setSettings]           = useState(cached.settings       || { netIncome: 0, anchorDay: 25 });
+  const [settings, setSettings]           = useState(cached.settings       || { netIncome: 0, anchorDay: 25, fuelGrade: 'p95Coastal' });
   const [rawStatements, setRawStatements] = useState(cached.rawStatements  || []);
   const [history, setHistory]             = useState(cached.history        || []);
   const [overrides, setOverrides]         = useState(() => loadLS(K.overrides, {}));
@@ -440,6 +440,7 @@ function BudgetTracker() {
       const nSettings = {
         netIncome: Number(s['Net Income']) || 0,
         anchorDay: Number(s['Anchor Day']) || 25,
+        fuelGrade: String(s['Fuel Grade'] || 'p95Coastal'),
         // Account numbers whose balance sign should flip — for banks that
         // represent credit-card debt with the opposite convention to Capitec.
         invertedAccounts: invertedRaw.split(',').map(x => x.trim()).filter(Boolean),
@@ -682,6 +683,7 @@ function BudgetTracker() {
       await sheetFetch(config, null, { action: 'save-settings', settings: {
         'Net Income': newSettings.netIncome,
         'Anchor Day': newSettings.anchorDay,
+        'Fuel Grade': newSettings.fuelGrade || 'p95Coastal',
         'Inverted Accounts': (newSettings.invertedAccounts || []).join(','),
       } });
       setBudget(newBudget);
@@ -1028,6 +1030,7 @@ function BudgetTracker() {
       await sheetFetch(config, null, { action: 'save-settings', settings: {
         'Net Income': newSettings.netIncome,
         'Anchor Day': newSettings.anchorDay,
+        'Fuel Grade': newSettings.fuelGrade || 'p95Coastal',
         'Inverted Accounts': (newSettings.invertedAccounts || []).join(','),
       } });
       cacheSnapshot({ settings: newSettings });
@@ -1182,7 +1185,8 @@ function BudgetTracker() {
                                       onSaveSettings={handleSaveSettings}
                                       balanceOverride={balanceOverride}
                                       setBalanceOverride={setBalanceOverride}
-                                      onFetchPetrolPrice={() => sheetFetch(config, 'petrol-price')}
+                                      onFetchPetrolPrice={() => sheetFetch(config, 'petrol-price', { grade: settings.fuelGrade || 'p95Coastal' })}
+                                      onFetchFuelHistory={(months = 12) => sheetFetch(config, 'fuel-price-history', { grade: settings.fuelGrade || 'p95Coastal', months })}
                                     />}
         {tab === 'transactions' && <Transactions
                                       allTxs={allTxs}
@@ -1477,7 +1481,208 @@ function Field({ label, children }) {
    Shows where the line is expected to land by payday, based on the line's
    Forecast type configured in the Budget tab.
    ========================================================================== */
-function ForecastPanel({ line, actual, daysElapsed, daysLeft, daysInCycle, petrolPrice, petrolError }) {
+const FUEL_GRADE_LABELS = {
+  p95Coastal: '95 Coastal',
+  p95Inland:  '95 Inland',
+  p93Inland:  '93 Inland',
+};
+
+const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const monthShortLabel = (yyyymm) => {
+  if (!yyyymm || yyyymm.length < 7) return yyyymm || '';
+  const y = yyyymm.slice(0, 4);
+  const m = parseInt(yyyymm.slice(5, 7), 10);
+  return `${MONTH_NAMES[m - 1] || ''} ${y}`;
+};
+const daysInYearMonth = (yyyymm) => {
+  if (!yyyymm || yyyymm.length < 7) return 30;
+  return new Date(Number(yyyymm.slice(0, 4)), Number(yyyymm.slice(5, 7)), 0).getDate();
+};
+
+// Minimal SVG sparkline. Polyline + endpoint dot, no axes. Caller provides
+// the values; we just plot them in order.
+function Sparkline({ values, width = 200, height = 40, padding = 3 }) {
+  if (!values || values.length < 2) return null;
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const range = max - min || 1;
+  const innerW = width  - padding * 2;
+  const innerH = height - padding * 2;
+  const stepX = innerW / (values.length - 1);
+  const pts = values.map((v, i) => {
+    const x = padding + i * stepX;
+    const y = padding + innerH * (1 - (v - min) / range);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  });
+  const lastX = padding + (values.length - 1) * stepX;
+  const lastY = padding + innerH * (1 - (values[values.length - 1] - min) / range);
+  return (
+    <svg width={width} height={height} className="text-stone-700 overflow-visible">
+      <polyline fill="none" stroke="currentColor" strokeWidth="1.5" points={pts.join(' ')} />
+      <circle cx={lastX} cy={lastY} r="2.5" fill="currentColor" />
+    </svg>
+  );
+}
+
+// Petrol-specific forecast: live grade/price + current projection +
+// what-if price + what-if km/day + sparkline of monthly spend at current
+// km/day across past months. Split out because of hooks (state + effects).
+function PetrolForecast({ line, absActual, budgetAmt, daysLeft, daysInCycle, petrolPrice, petrolError, onFetchFuelHistory }) {
+  const l100 = Number(line.l100) || 0;
+  const kmPerDay = Number(line.kmPerDay) || 0;
+  const litresPerDay = (l100 * kmPerDay) / 100;
+  const price = petrolPrice ? Number(petrolPrice.price) : null;
+
+  // What-if inputs — fall back to current values when blank so the side cards
+  // always show something coherent.
+  const [whatIfPrice, setWhatIfPrice] = useState('');
+  const [compareKm,   setCompareKm]   = useState('');
+  const whatIfPriceN = whatIfPrice === '' ? null : Number(whatIfPrice);
+  const compareKmN   = compareKm   === '' ? null : Number(compareKm);
+
+  // Sparkline — fetch lazily on first render, then memoize.
+  const [history, setHistory]           = useState(null);
+  const [historyError, setHistoryError] = useState(null);
+  useEffect(() => {
+    if (!onFetchFuelHistory || history || historyError) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await onFetchFuelHistory(12);
+        if (cancelled) return;
+        if (res && res.ok) setHistory(res);
+        else setHistoryError((res && res.error) || 'history unavailable');
+      } catch (e) {
+        if (!cancelled) setHistoryError(e.message || String(e));
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [onFetchFuelHistory, history, historyError]);
+
+  // Project totals given an arbitrary (price, kmPerDay) combo. Convention
+  // matches the standard case: absActual + dailyCost * daysLeft.
+  const projectAt = (p, kpd) => {
+    if (!p || !l100 || !kpd) return { daily: null, projected: null };
+    const daily = (l100 * kpd / 100) * p;
+    return { daily, projected: absActual + daily * daysLeft };
+  };
+  const current     = projectAt(price, kmPerDay);
+  const wPriceCard  = projectAt(whatIfPriceN || price, kmPerDay);
+  const wKmCard     = projectAt(price, compareKmN || kmPerDay);
+
+  const sourceBadge = petrolPrice && petrolPrice.source && petrolPrice.source !== 'cache' && petrolPrice.source !== 'api'
+    ? <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 bg-amber-100 text-amber-800 border border-amber-200">{petrolPrice.source === 'stale-cache' ? 'STALE' : petrolPrice.source.toUpperCase()}</span>
+    : null;
+
+  const gradeLabel = (petrolPrice && FUEL_GRADE_LABELS[petrolPrice.grade]) || '95 Coastal';
+
+  // Sparkline values = projected monthly spend at current kmPerDay, per
+  // historical month. Skip if usage isn't set yet.
+  const sparkData = (history && history.months && l100 && kmPerDay)
+    ? history.months.map(m => ({
+        month: m.month,
+        spend: (l100 * kmPerDay / 100) * Number(m.price) * daysInYearMonth(m.month),
+      }))
+    : [];
+
+  return (
+    <div className="space-y-3">
+      <div className="text-[11px] text-stone-600 flex items-baseline gap-2 flex-wrap">
+        {price ? (
+          <>
+            <span><strong className="font-num text-base text-stone-800">R{price.toFixed(2)}/L</strong></span>
+            <span>· {gradeLabel}</span>
+            {petrolPrice && petrolPrice.month && <span>· {monthShortLabel(petrolPrice.month)}</span>}
+            {sourceBadge}
+          </>
+        ) : petrolError ? <span className="text-red-700">price unavailable: {petrolError}</span>
+                       : <span>fetching live price…</span>}
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+        <Field label="Your usage">{l100 || '–'} L/100 · {kmPerDay || '–'} km/day</Field>
+        <Field label="Daily cost">{current.daily != null ? fmt(current.daily) + '/day' : '–'}</Field>
+        <Field label="Projected by payday">
+          {current.projected != null
+            ? <span className={current.projected > budgetAmt ? 'text-red-700 font-num' : 'text-emerald-700 font-num'}>{fmt(current.projected)}</span>
+            : '–'}
+        </Field>
+        <Field label={current.projected != null && current.projected > budgetAmt ? 'Will overspend by' : 'Will save'}>
+          {current.projected != null
+            ? <span className={current.projected > budgetAmt ? 'text-red-700 font-num' : 'text-emerald-700 font-num'}>{fmt(Math.abs(current.projected - budgetAmt))}</span>
+            : '–'}
+        </Field>
+      </div>
+
+      {(!l100 || !kmPerDay) && (
+        <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 px-3 py-2">
+          Set <strong>L/100</strong> and <strong>km/day</strong> for this line in the Budget tab to enable petrol forecasting and what-if analysis.
+        </div>
+      )}
+
+      {l100 && kmPerDay && price ? (
+        <div className="bg-stone-50 border border-stone-200 p-3 space-y-3">
+          <div className="text-[10px] uppercase tracking-wider text-stone-500">What if…</div>
+
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 items-center text-sm">
+            <label className="text-xs text-stone-600">price changes to</label>
+            <div className="flex items-center gap-1.5">
+              <span className="text-xs text-stone-500">R</span>
+              <input type="number" step="0.10" inputMode="decimal" value={whatIfPrice}
+                     onChange={e => setWhatIfPrice(e.target.value)}
+                     placeholder={price.toFixed(2)}
+                     className="px-2 py-1 border border-stone-300 font-num text-sm w-24" />
+              <span className="text-xs text-stone-500">/L</span>
+            </div>
+            <Field label="Daily cost">{wPriceCard.daily != null ? fmt(wPriceCard.daily) + '/day' : '–'}</Field>
+            <Field label="Projected by payday">
+              {wPriceCard.projected != null
+                ? <span className={wPriceCard.projected > budgetAmt ? 'text-red-700 font-num' : 'text-emerald-700 font-num'}>{fmt(wPriceCard.projected)}</span>
+                : '–'}
+            </Field>
+          </div>
+
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 items-center text-sm">
+            <label className="text-xs text-stone-600">I drive instead</label>
+            <div className="flex items-center gap-1.5">
+              <input type="number" step="1" inputMode="numeric" value={compareKm}
+                     onChange={e => setCompareKm(e.target.value)}
+                     placeholder={String(kmPerDay)}
+                     className="px-2 py-1 border border-stone-300 font-num text-sm w-24" />
+              <span className="text-xs text-stone-500">km/day</span>
+            </div>
+            <Field label="Daily cost">{wKmCard.daily != null ? fmt(wKmCard.daily) + '/day' : '–'}</Field>
+            <Field label="Projected by payday">
+              {wKmCard.projected != null
+                ? <span className={wKmCard.projected > budgetAmt ? 'text-red-700 font-num' : 'text-emerald-700 font-num'}>{fmt(wKmCard.projected)}</span>
+                : '–'}
+            </Field>
+          </div>
+        </div>
+      ) : null}
+
+      {sparkData.length >= 2 ? (
+        <div className="bg-white border border-stone-200 p-3 space-y-1">
+          <div className="text-[11px] text-stone-600 flex items-baseline justify-between flex-wrap gap-2">
+            <span>Monthly fuel at your {kmPerDay} km/day, last {sparkData.length} months</span>
+            <span className="font-num text-stone-800">
+              R{Math.round(sparkData[0].spend).toLocaleString('en-ZA')}
+              {' → '}
+              R{Math.round(sparkData[sparkData.length - 1].spend).toLocaleString('en-ZA')}
+            </span>
+          </div>
+          <Sparkline values={sparkData.map(d => d.spend)} width={240} height={42} />
+          <div className="flex justify-between text-[10px] text-stone-500 font-num">
+            <span>{monthShortLabel(sparkData[0].month)}</span>
+            <span>{monthShortLabel(sparkData[sparkData.length - 1].month)}</span>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function ForecastPanel({ line, actual, daysElapsed, daysLeft, daysInCycle, petrolPrice, petrolError, onFetchFuelHistory }) {
   const type = line.forecast || '';
   const absActual = Math.abs(actual);
   const budgetAmt = line.amount || 0;
@@ -1519,41 +1724,17 @@ function ForecastPanel({ line, actual, daysElapsed, daysLeft, daysInCycle, petro
   }
 
   if (type === 'petrol') {
-    const l100 = Number(line.l100) || 0;
-    const kmPerDay = Number(line.kmPerDay) || 0;
-    const litresPerDay = (l100 * kmPerDay) / 100;
-    const price = petrolPrice ? Number(petrolPrice.price) : null;
-    const dailyCost = price ? litresPerDay * price : null;
-    const projected = price ? absActual + (dailyCost * daysLeft) : null;
-    const projOverBy = projected != null ? projected - budgetAmt : null;
     return (
-      <div className="space-y-3">
-        <div className="text-[11px] text-stone-500">
-          Live coastal price from Astron Energy (cached 6h).{' '}
-          {price ? <>Currently <span className="font-num text-stone-800">R{price.toFixed(2)}/L</span>{petrolPrice && petrolPrice.asOf ? <> · as of {new Date(petrolPrice.asOf).toLocaleString('en-ZA')}</> : null}.</>
-                 : petrolError ? <span className="text-red-700">price unavailable: {petrolError}</span>
-                                : <span>fetching…</span>}
-        </div>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
-          <Field label="Your usage">{l100 || '–'} L/100 · {kmPerDay || '–'} km/day</Field>
-          <Field label="Daily cost">{dailyCost != null ? fmt(dailyCost) + '/day' : '–'}</Field>
-          <Field label="Projected by payday">
-            {projected != null
-              ? <span className={projected > budgetAmt ? 'text-red-700 font-num' : 'text-emerald-700 font-num'}>{fmt(projected)}</span>
-              : '–'}
-          </Field>
-          <Field label={projOverBy != null && projOverBy > 0 ? 'Will overspend by' : 'Will save'}>
-            {projOverBy != null
-              ? <span className={projOverBy > 0 ? 'text-red-700 font-num' : 'text-emerald-700 font-num'}>{fmt(Math.abs(projOverBy))}</span>
-              : '–'}
-          </Field>
-        </div>
-        {(!l100 || !kmPerDay) && (
-          <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 px-3 py-2">
-            Set <strong>L/100</strong> and <strong>km/day</strong> for this line in the Budget tab to enable petrol forecasting.
-          </div>
-        )}
-      </div>
+      <PetrolForecast
+        line={line}
+        absActual={absActual}
+        budgetAmt={budgetAmt}
+        daysLeft={daysLeft}
+        daysInCycle={daysInCycle}
+        petrolPrice={petrolPrice}
+        petrolError={petrolError}
+        onFetchFuelHistory={onFetchFuelHistory}
+      />
     );
   }
 
@@ -1567,7 +1748,7 @@ function ForecastPanel({ line, actual, daysElapsed, daysLeft, daysInCycle, petro
 /* ============================================================================
    Dashboard
    ========================================================================== */
-function Dashboard({ budget: defaultBudget, budgetOverrides, effectiveBudgetForCycle, actuals, settings, dateRange, setDateRange, defaultRange, windowTxs, allCycles, cycleActuals, hasData, privateMode, setPrivateMode, rawStatements, onSaveSettings, balanceOverride, setBalanceOverride, onFetchPetrolPrice }) {
+function Dashboard({ budget: defaultBudget, budgetOverrides, effectiveBudgetForCycle, actuals, settings, dateRange, setDateRange, defaultRange, windowTxs, allCycles, cycleActuals, hasData, privateMode, setPrivateMode, rawStatements, onSaveSettings, balanceOverride, setBalanceOverride, onFetchPetrolPrice, onFetchFuelHistory }) {
   if (!hasData) return <EmptyState />;
 
   // Resolve the budget for the currently-viewed cycle (defaults + any per-cycle
@@ -1655,13 +1836,23 @@ function Dashboard({ budget: defaultBudget, budgetOverrides, effectiveBudgetForC
   // Logic uses the line's Forecast type set in the Budget tab:
   //   daily  — extrapolate from current burn rate to payday
   //   fixed  — show as one-off debit (paid / unpaid)
-  //   petrol — multiply live coastal price by your L/100 + km/day
+  //   petrol — multiply live fuel price by your L/100 + km/day
   const [expandedBudgetLine, setExpandedBudgetLine] = useState(null);
-  const [petrolPrice, setPetrolPrice] = useState(null); // {price, asOf} or null
+  // {price, asOf, source, month, grade} or null. month/grade/source come from
+  // sa-fuel-api; for the Astron fallback, source='astron' and grade='p95Coastal'.
+  const [petrolPrice, setPetrolPrice] = useState(null);
   const [petrolError, setPetrolError] = useState(null);
   // Pull live coastal petrol price once per session when the user opens any
   // petrol-forecast line. Cached server-side for 6h, so this only really
-  // hits Astron a few times a day across all users.
+  // hits the upstream sources a few times a day across all users.
+  // Drop the cached price if the user changes their fuel grade — otherwise
+  // we'd keep showing the previous grade's price.
+  useEffect(() => {
+    if (petrolPrice && petrolPrice.grade && petrolPrice.grade !== (settings.fuelGrade || 'p95Coastal')) {
+      setPetrolPrice(null);
+      setPetrolError(null);
+    }
+  }, [settings.fuelGrade, petrolPrice]);
   useEffect(() => {
     if (!expandedBudgetLine || !onFetchPetrolPrice) return;
     const exp = budget.find(b => b.line === expandedBudgetLine);
@@ -1671,7 +1862,13 @@ function Dashboard({ budget: defaultBudget, budgetOverrides, effectiveBudgetForC
       try {
         const res = await onFetchPetrolPrice();
         if (!cancelled && res && res.ok && res.price) {
-          setPetrolPrice({ price: res.price, asOf: res.asOf });
+          setPetrolPrice({
+            price: res.price,
+            asOf:  res.asOf,
+            month: res.month,
+            grade: res.grade,
+            source: res.source,
+          });
         } else if (!cancelled) {
           setPetrolError(res && res.error ? res.error : 'price unavailable');
         }
@@ -1976,6 +2173,7 @@ function Dashboard({ budget: defaultBudget, budgetOverrides, effectiveBudgetForC
                           daysInCycle={daysInCycle}
                           petrolPrice={petrolPrice}
                           petrolError={petrolError}
+                          onFetchFuelHistory={onFetchFuelHistory}
                         />
                       </td>
                     </tr>
@@ -2805,7 +3003,16 @@ function BudgetEditor({ budget, budgetOverrides, onSaveOverrides, anchorDay, set
           <Field label="Cycle anchor day (1–28)">
             <input type="number" min="1" max="28" value={draftSettings.anchorDay} onChange={e => setDraftSettings({ ...draftSettings, anchorDay: Math.max(1, Math.min(28, parseInt(e.target.value, 10) || 25)) })} className="px-3 py-2 border border-stone-300 font-num text-lg w-24" />
           </Field>
-          <div className="text-xs text-stone-500 max-w-md">Each cycle runs from the anchor day of one month to the day before the anchor in the next month. You're paid on the 25th, so 25 is the natural choice.</div>
+          <Field label="Fuel grade">
+            <select value={draftSettings.fuelGrade || 'p95Coastal'}
+                    onChange={e => setDraftSettings({ ...draftSettings, fuelGrade: e.target.value })}
+                    className="px-3 py-2 border border-stone-300 text-sm bg-white">
+              <option value="p95Coastal">95 Coastal</option>
+              <option value="p95Inland">95 Inland</option>
+              <option value="p93Inland">93 Inland</option>
+            </select>
+          </Field>
+          <div className="text-xs text-stone-500 max-w-md">Each cycle runs from the anchor day of one month to the day before the anchor in the next month. You're paid on the 25th, so 25 is the natural choice. Fuel grade drives the petrol forecast — primary source is sa-fuel-api, Astron is fallback for coastal 95.</div>
         </div>
       </div>
 
