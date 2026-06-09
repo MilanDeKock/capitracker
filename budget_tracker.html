@@ -1499,28 +1499,81 @@ const daysInYearMonth = (yyyymm) => {
   return new Date(Number(yyyymm.slice(0, 4)), Number(yyyymm.slice(5, 7)), 0).getDate();
 };
 
-// Minimal SVG sparkline. Polyline + endpoint dot, no axes. Caller provides
-// the values; we just plot them in order.
-function Sparkline({ values, width = 200, height = 40, padding = 3 }) {
-  if (!values || values.length < 2) return null;
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  const range = max - min || 1;
-  const innerW = width  - padding * 2;
-  const innerH = height - padding * 2;
-  const stepX = innerW / (values.length - 1);
-  const pts = values.map((v, i) => {
-    const x = padding + i * stepX;
-    const y = padding + innerH * (1 - (v - min) / range);
-    return `${x.toFixed(1)},${y.toFixed(1)}`;
-  });
-  const lastX = padding + (values.length - 1) * stepX;
-  const lastY = padding + innerH * (1 - (values[values.length - 1] - min) / range);
+// Dual-line chart for fuel history: monthly spend (solid, dark) on the left
+// axis and R/L price (dashed, lighter) on the right axis. Dots on every
+// month with native SVG <title> tooltips so hover shows month/price/spend.
+// Independent scales per series so both lines use the full vertical range.
+function FuelHistoryChart({ data }) {
+  if (!data || data.length < 2) return null;
+  const width  = 320;
+  const height = 110;
+  const pad    = { l: 40, r: 40, t: 10, b: 22 };
+  const innerW = width  - pad.l - pad.r;
+  const innerH = height - pad.t - pad.b;
+
+  const spends = data.map(d => d.spend);
+  const prices = data.map(d => d.price);
+  const sMin = Math.min(...spends), sMax = Math.max(...spends);
+  const pMin = Math.min(...prices), pMax = Math.max(...prices);
+  const sRange = (sMax - sMin) || 1;
+  const pRange = (pMax - pMin) || 1;
+
+  const stepX = data.length === 1 ? 0 : innerW / (data.length - 1);
+  const xAt    = i => pad.l + i * stepX;
+  const ySpend = v => pad.t + innerH * (1 - (v - sMin) / sRange);
+  const yPrice = v => pad.t + innerH * (1 - (v - pMin) / pRange);
+
+  const spendPts = data.map((d, i) => `${xAt(i).toFixed(1)},${ySpend(d.spend).toFixed(1)}`).join(' ');
+  const pricePts = data.map((d, i) => `${xAt(i).toFixed(1)},${yPrice(d.price).toFixed(1)}`).join(' ');
+  const tip = d => `${monthShortLabel(d.month)}  R${d.price.toFixed(2)}/L  ·  R${Math.round(d.spend).toLocaleString('en-ZA')}/month`;
+
   return (
     <svg width={width} height={height} className="text-stone-700 overflow-visible">
-      <polyline fill="none" stroke="currentColor" strokeWidth="1.5" points={pts.join(' ')} />
-      <circle cx={lastX} cy={lastY} r="2.5" fill="currentColor" />
+      <polyline fill="none" stroke="currentColor" strokeWidth="1.5" points={spendPts} />
+      <polyline fill="none" stroke="#a8a29e" strokeWidth="1" strokeDasharray="3 2" points={pricePts} />
+      {data.map((d, i) => (
+        <g key={d.month}>
+          <circle cx={xAt(i)} cy={ySpend(d.spend)} r="2"   fill="currentColor"><title>{tip(d)}</title></circle>
+          <circle cx={xAt(i)} cy={yPrice(d.price)} r="1.5" fill="#a8a29e"><title>{tip(d)}</title></circle>
+        </g>
+      ))}
+      {/* Spend axis (left) */}
+      <text x={pad.l - 4} y={pad.t + 4}      textAnchor="end" fontSize="9" fill="#57534e">R{Math.round(sMax).toLocaleString('en-ZA')}</text>
+      <text x={pad.l - 4} y={pad.t + innerH} textAnchor="end" fontSize="9" fill="#57534e">R{Math.round(sMin).toLocaleString('en-ZA')}</text>
+      {/* Price axis (right) */}
+      <text x={width - pad.r + 4} y={pad.t + 4}      textAnchor="start" fontSize="9" fill="#a8a29e">{pMax.toFixed(2)}</text>
+      <text x={width - pad.r + 4} y={pad.t + innerH} textAnchor="start" fontSize="9" fill="#a8a29e">{pMin.toFixed(2)}</text>
+      {/* X axis (months: first / last) */}
+      <text x={pad.l}            y={height - 6} fontSize="9" fill="#57534e">{monthShortLabel(data[0].month)}</text>
+      <text x={width - pad.r}    y={height - 6} textAnchor="end" fontSize="9" fill="#57534e">{monthShortLabel(data[data.length - 1].month)}</text>
     </svg>
+  );
+}
+
+// Full table of every month in the history — shown when the user expands
+// "Show months". Compact 3-column layout sized for the forecast panel.
+function FuelHistoryTable({ data }) {
+  return (
+    <div className="max-h-48 overflow-y-auto border border-stone-200 mt-2">
+      <table className="w-full text-xs">
+        <thead className="bg-stone-50 text-stone-500 uppercase tracking-wider">
+          <tr>
+            <th className="px-3 py-1.5 text-left  font-medium">Month</th>
+            <th className="px-3 py-1.5 text-right font-medium">R/L</th>
+            <th className="px-3 py-1.5 text-right font-medium">R/month</th>
+          </tr>
+        </thead>
+        <tbody>
+          {data.map(d => (
+            <tr key={d.month} className="border-t border-stone-100">
+              <td className="px-3 py-1 font-num">{monthShortLabel(d.month)}</td>
+              <td className="px-3 py-1 text-right font-num">{d.price.toFixed(2)}</td>
+              <td className="px-3 py-1 text-right font-num">{Math.round(d.spend).toLocaleString('en-ZA')}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
 
@@ -1537,6 +1590,7 @@ function PetrolForecast({ line, absActual, budgetAmt, daysLeft, daysInCycle, pet
   // always show something coherent.
   const [whatIfPrice, setWhatIfPrice] = useState('');
   const [compareKm,   setCompareKm]   = useState('');
+  const [showHistoryTable, setShowHistoryTable] = useState(false);
   const whatIfPriceN = whatIfPrice === '' ? null : Number(whatIfPrice);
   const compareKmN   = compareKm   === '' ? null : Number(compareKm);
 
@@ -1576,11 +1630,12 @@ function PetrolForecast({ line, absActual, budgetAmt, daysLeft, daysInCycle, pet
 
   const gradeLabel = (petrolPrice && FUEL_GRADE_LABELS[petrolPrice.grade]) || '95 Coastal';
 
-  // Sparkline values = projected monthly spend at current kmPerDay, per
-  // historical month. Skip if usage isn't set yet.
+  // Chart series = projected monthly spend at current kmPerDay + raw R/L
+  // price, per historical month. Skip if usage isn't set yet.
   const sparkData = (history && history.months && l100 && kmPerDay)
     ? history.months.map(m => ({
         month: m.month,
+        price: Number(m.price),
         spend: (l100 * kmPerDay / 100) * Number(m.price) * daysInYearMonth(m.month),
       }))
     : [];
@@ -1662,7 +1717,7 @@ function PetrolForecast({ line, absActual, budgetAmt, daysLeft, daysInCycle, pet
       ) : null}
 
       {sparkData.length >= 2 ? (
-        <div className="bg-white border border-stone-200 p-3 space-y-1">
+        <div className="bg-white border border-stone-200 p-3 space-y-2">
           <div className="text-[11px] text-stone-600 flex items-baseline justify-between flex-wrap gap-2">
             <span>Monthly fuel at your {kmPerDay} km/day, last {sparkData.length} months</span>
             <span className="font-num text-stone-800">
@@ -1671,11 +1726,28 @@ function PetrolForecast({ line, absActual, budgetAmt, daysLeft, daysInCycle, pet
               R{Math.round(sparkData[sparkData.length - 1].spend).toLocaleString('en-ZA')}
             </span>
           </div>
-          <Sparkline values={sparkData.map(d => d.spend)} width={240} height={42} />
-          <div className="flex justify-between text-[10px] text-stone-500 font-num">
-            <span>{monthShortLabel(sparkData[0].month)}</span>
-            <span>{monthShortLabel(sparkData[sparkData.length - 1].month)}</span>
+          <div className="flex items-start gap-4 flex-wrap">
+            <FuelHistoryChart data={sparkData} />
+            <div className="text-[10px] text-stone-500 space-y-1 pt-2">
+              <div className="flex items-center gap-1.5">
+                <svg width="14" height="6"><line x1="0" y1="3" x2="14" y2="3" stroke="#44403c" strokeWidth="1.5" /></svg>
+                <span>R/month</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <svg width="14" height="6"><line x1="0" y1="3" x2="14" y2="3" stroke="#a8a29e" strokeWidth="1" strokeDasharray="3 2" /></svg>
+                <span>R/L</span>
+              </div>
+              <div className="text-stone-400 pt-1">Hover a dot for detail.</div>
+            </div>
           </div>
+          <button
+            type="button"
+            onClick={() => setShowHistoryTable(s => !s)}
+            className="text-[11px] text-stone-600 hover:text-stone-800 underline decoration-dotted underline-offset-2"
+          >
+            {showHistoryTable ? '▾ Hide months' : '▸ Show months'}
+          </button>
+          {showHistoryTable && <FuelHistoryTable data={sparkData} />}
         </div>
       ) : null}
     </div>
