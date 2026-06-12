@@ -1754,15 +1754,50 @@ function PetrolForecast({ line, absActual, budgetAmt, daysLeft, daysInCycle, pet
   );
 }
 
-function ForecastPanel({ line, actual, daysElapsed, daysLeft, daysInCycle, petrolPrice, petrolError, onFetchFuelHistory }) {
+// Lump-proof daily burn rate. A naive "spent ÷ days elapsed" treats one big
+// shop as a permanent high spending rate, so a R900 grocery run on day 2 reads
+// as ~R450/day and false-flags a huge overspend. Instead we amortise each
+// purchase over how long it lasts at the budgeted daily rate: a R900 buy on a
+// R93/day budget is ~10 days of cover, so only the days that have actually
+// elapsed since the purchase count as "consumed" so far. A fresh lump barely
+// moves the rate (the rest is stock on hand); only sustained elevated buying
+// pushes the rate up. When spend is smooth this equals the naive average, so
+// well-behaved lines look exactly as before.
+function amortizedDailyBurn(lineTxs, dailyBudget, todayISO, daysElapsed) {
+  if (!lineTxs || !lineTxs.length || !daysElapsed) return 0;
+  const today = parseISO(todayISO);
+  const total = lineTxs.reduce((s, t) => s + t.amount, 0);
+  // No budget (can't size a cover window) or unparseable date → fall back to
+  // the naive average rather than silently zeroing out.
+  if (!today || !(dailyBudget > 0)) return total / daysElapsed;
+  let consumed = 0;
+  for (const t of lineTxs) {
+    const d = parseISO(t.date);
+    let daysSince = d ? Math.round((today - d) / 86400000) + 1 : daysElapsed;
+    if (daysSince < 1) daysSince = 1;
+    if (daysSince > daysElapsed) daysSince = daysElapsed;
+    consumed += Math.min(daysSince * dailyBudget, t.amount);
+  }
+  return consumed / daysElapsed;
+}
+
+function ForecastPanel({ line, actual, daysElapsed, daysLeft, daysInCycle, petrolPrice, petrolError, onFetchFuelHistory, lineTxs, todayISO }) {
   const type = line.forecast || '';
   const absActual = Math.abs(actual);
   const budgetAmt = line.amount || 0;
   const remaining = budgetAmt - absActual;
 
   if (type === 'daily') {
-    const dailyBurn = daysElapsed > 0 ? absActual / daysElapsed : 0;
-    const projected = absActual + (dailyBurn * daysLeft);
+    // Amortised rate so a single big shop doesn't read as a runaway burn.
+    const dailyBudget = daysInCycle > 0 ? budgetAmt / daysInCycle : 0;
+    const dailyBurn = (lineTxs && lineTxs.length)
+      ? amortizedDailyBurn(lineTxs, dailyBudget, todayISO, daysElapsed)
+      : (daysElapsed > 0 ? absActual / daysElapsed : 0);
+    // Project the rate across the WHOLE cycle (not spent + rate × daysLeft):
+    // a big lump already bakes future days into `absActual`, so adding more on
+    // top would double-count the pantry. Floor at what's already spent — you
+    // can't un-spend, and a late-cycle stockpile shouldn't project below it.
+    const projected = Math.max(absActual, dailyBurn * daysInCycle);
     const projOverBy = projected - budgetAmt;
     return (
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
@@ -1961,6 +1996,20 @@ function Dashboard({ budget: defaultBudget, budgetOverrides, effectiveBudgetForC
   const daysInCycle  = cycleStartDate && cycleEndDate ? Math.max(1, Math.round((cycleEndDate - cycleStartDate) / 86400000) + 1) : 30;
   const daysElapsed  = cycleStartDate && todayDate    ? Math.max(1, Math.min(daysInCycle, Math.round((todayDate - cycleStartDate) / 86400000) + 1)) : 1;
   const daysLeft     = Math.max(0, daysInCycle - daysElapsed);
+
+  // Per-line spend transactions ({date, amount}), used by the daily-burn
+  // forecast to amortise lumpy purchases. Spends only (credits/refunds are
+  // netted into the displayed actual, but they aren't "consumption"). Mirrors
+  // the splits handling in `actuals` so a split row contributes only its share.
+  const lineSpendTxs = (lineName) => windowTxs.flatMap(t => {
+    if (!t.amount || t.amount >= 0) return [];
+    const d = effectiveDate(t);
+    if (t.splits && t.splits.length) {
+      const m = t.splits.find(s => s.line === lineName);
+      return m ? [{ date: d, amount: Math.abs(m.amount) }] : [];
+    }
+    return t.line === lineName ? [{ date: d, amount: Math.abs(t.amount) }] : [];
+  });
   // By-cycle table is collapsed by default — useful but noisy day-to-day.
   // Persist so the user's preference sticks across reloads.
   const [byCycleExpanded, _setByCycleExpanded] = useState(() => loadLS(K.byCycleExpanded, false));
@@ -2246,6 +2295,8 @@ function Dashboard({ budget: defaultBudget, budgetOverrides, effectiveBudgetForC
                           petrolPrice={petrolPrice}
                           petrolError={petrolError}
                           onFetchFuelHistory={onFetchFuelHistory}
+                          lineTxs={b.forecast === 'daily' ? lineSpendTxs(b.line) : null}
+                          todayISO={todayISO}
                         />
                       </td>
                     </tr>
