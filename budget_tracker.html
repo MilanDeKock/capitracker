@@ -1793,11 +1793,15 @@ function ForecastPanel({ line, actual, daysElapsed, daysLeft, daysInCycle, petro
     const dailyBurn = (lineTxs && lineTxs.length)
       ? amortizedDailyBurn(lineTxs, dailyBudget, todayISO, daysElapsed)
       : (daysElapsed > 0 ? absActual / daysElapsed : 0);
-    // Project the rate across the WHOLE cycle (not spent + rate × daysLeft):
-    // a big lump already bakes future days into `absActual`, so adding more on
-    // top would double-count the pantry. Floor at what's already spent — you
-    // can't un-spend, and a late-cycle stockpile shouldn't project below it.
-    const projected = Math.max(absActual, dailyBurn * daysInCycle);
+    // Projection = spend so far + the BUDGETED rate for the days not yet
+    // reached. We deliberately do NOT extrapolate the current rate forward: a
+    // slow/early start at R63/day shouldn't project "way under" by assuming you
+    // keep under-spending all month. `consumedSoFar` is the lump-smoothed spend
+    // (not raw `absActual`), so a big shop early still doesn't false-flag — the
+    // un-consumed stock is left to be covered by the budgeted forward rate.
+    // Floored at actual spend: you can't un-spend a late-cycle stockpile.
+    const consumedSoFar = dailyBurn * daysElapsed;
+    const projected = Math.max(absActual, consumedSoFar + dailyBudget * daysLeft);
     const projOverBy = projected - budgetAmt;
     return (
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
