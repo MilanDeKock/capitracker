@@ -74,6 +74,8 @@ If you'd rather skip the CSV-forwarding step entirely, Capitec emails monthly PD
 3. Save & redeploy.
 4. In CapiTracker, click the new **Sync PDF (AI)** button. Each PDF takes ~3 minutes to parse — go make a coffee ☕. Transactions appear when it's done.
 
+> **Batch parsing:** email a whole stack of PDF statements at once (anything received in the last 7 days is eligible). Each sync parses up to 2 new PDFs — already-parsed ones are remembered and never re-charged, so just click **Sync PDF (AI)** again after each run and CapiTracker works through the queue. The status line tells you how many are still waiting.
+
 **You can switch between CSV and PDF flows at any time.** Pick whichever fits your routine. Many users find PDF mode less effort once it's set up (Capitec auto-emails the statement; you just hit Sync PDF when you remember).
 
 ## Features

@@ -466,16 +466,26 @@ function BudgetTracker() {
         }
       } catch (_) {}
       saveLS(K.cache, { rawStatements: nRaw, history: nHist, budget: nBudget, budgetOverrides: nOverrides, rules: nRules, settings: nSettings });
-      const sourceLabel = pullMode === 'csv' ? 'CSV statements'
-                        : pullMode === 'pdf' ? 'PDF statements (AI-parsed)'
-                        : pull ? 'Gmail' : null;
-      setSyncStatus({
-        kind: 'ok',
-        message: sourceLabel
-          ? `Pulled ${sourceLabel}. ${nRaw.length} raw rows, ${nHist.length} in history.`
-          : `Loaded. ${nRaw.length} raw rows, ${nHist.length} in history.`,
-        when: new Date(),
-      });
+      const info = data.pullInfo || null;
+      const tail = `${nRaw.length} raw rows, ${nHist.length} in history.`;
+      let message;
+      if (pullMode === 'pdf') {
+        if (info && info.aiEnabled === false) {
+          message = 'PDF sync needs GEMINI_API_KEY in Apps Script → Project Settings → Script Properties. No key found, nothing parsed.';
+        } else if (info) {
+          const bits = [info.parsed
+            ? `Parsed ${info.parsed} PDF${info.parsed === 1 ? '' : 's'} (${info.pdfTx} transactions)`
+            : 'No new PDFs to parse'];
+          if (info.queued) bits.push(`${info.queued} still queued — hit Sync PDF again to continue`);
+          message = `${bits.join('. ')}. ${tail}`;
+        } else {
+          message = `Pulled PDF statements (AI-parsed). ${tail}`;
+        }
+      } else {
+        const sourceLabel = pullMode === 'csv' ? 'CSV statements' : pull ? 'Gmail' : null;
+        message = sourceLabel ? `Pulled ${sourceLabel}. ${tail}` : `Loaded. ${tail}`;
+      }
+      setSyncStatus({ kind: 'ok', message, when: new Date() });
     } catch (e) {
       setSyncStatus({ kind: 'err', message: e.message || String(e), when: new Date() });
     } finally {
@@ -1400,8 +1410,8 @@ function Uploader({ onFiles, fileNames, error, clear, configured, loading, onSyn
                       className="px-2.5 py-1 text-xs uppercase tracking-wider font-medium border border-slate-800 text-slate-800 hover:bg-slate-800 hover:text-stone-50 disabled:opacity-50 flex items-center gap-1.5">
                 <IconRefresh className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />Sync CSV
               </button>
-              <button onClick={() => { if (confirm('PDF parsing via Gemini takes ~3 min per statement. Go make a coffee ☕')) onSyncPdf(); }} disabled={loading}
-                      title="Parse Capitec PDF statements via Gemini AI. Slow (~3 min per PDF) — needs GEMINI_API_KEY set in Apps Script."
+              <button onClick={() => { if (confirm('PDF parsing via Gemini takes ~3 min per statement, up to 2 per sync. Emailed a batch? Click Sync PDF again after each run to work through the queue. Go make a coffee ☕')) onSyncPdf(); }} disabled={loading}
+                      title="Parse bank PDF statements via Gemini AI. ~3 min per PDF, up to 2 per sync — batch-email a stack and re-click to drain the queue. Needs GEMINI_API_KEY set in Apps Script."
                       className="px-2.5 py-1 text-xs uppercase tracking-wider font-medium border border-indigo-700 text-indigo-700 hover:bg-indigo-700 hover:text-stone-50 disabled:opacity-50 flex items-center gap-1.5">
                 <IconRefresh className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />Sync PDF (AI)
               </button>

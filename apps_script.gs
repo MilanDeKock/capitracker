@@ -51,7 +51,9 @@
     const T_SETTINGS  = 'Settings';
 
     const HEADERS = {
-      [T_RAW]:       ['Nr','Account','Posting Date','Transaction Date','Description','Original Description','Parent Category','Category','Money In','Money Out','Fee','Balance'],
+      // 'Source' tags how a row got here: 'csv' (regenerated from email every
+      // pull) or 'pdf' (parsed once by Gemini, then preserved — never re-parsed).
+      [T_RAW]:       ['Nr','Account','Posting Date','Transaction Date','Description','Original Description','Parent Category','Category','Money In','Money Out','Fee','Balance','Source'],
       [T_HISTORY]:   ['Account','Posting Date','Transaction Date','Description','Original Description','Parent Category','Category','Money In','Money Out','Fee','Line','Splits','Budget Date','Posted At'],
       // Forecast columns:
       //   Forecast = 'daily' | 'fixed' | 'petrol' | '' (none)
@@ -104,7 +106,10 @@
     // ============================================================================
     function onOpen() {
       ensureTabs_();
-      try { pullStatements_(); }
+      // CSV only on open — fast and safe. PDF parsing is a multi-minute Gemini
+      // call that belongs behind the explicit "Sync PDF" button, not a sheet open
+      // (onOpen runs under tight time limits and can't show an auth prompt).
+      try { pullStatements_('csv'); }
       catch (e) { Logger.log('Email pull failed: ' + e); }
     }
 
@@ -158,80 +163,129 @@
     //   - PDF: account_statement.pdf etc. (sent directly by Capitec, parsed
     //          by Gemini if GEMINI_API_KEY is set in Script Properties)
     // ============================================================================
-    // How many PDF statements to parse per Sync. Each PDF costs ~2-3 minutes
-    // of Gemini time, and Apps Script web app calls cap at 6 minutes total.
-    // Parsing the newest one only is plenty for typical use — older statements
-    // are already in your Sheet from previous syncs.
-    const MAX_PDFS_PER_SYNC = 1;
+    // PDF parsing budget. Each PDF is one Gemini call (~2-3 min) and Apps Script
+    // kills web-app executions at 6 min, so we parse a few new PDFs per sync and
+    // leave the rest queued for the next "Sync PDF" click. A per-attachment
+    // registry (getParsedPdfs_) records what's done, so we never re-parse — email
+    // a whole batch and click Sync PDF a few times to drain the queue.
+    const MAX_PDFS_PER_SYNC   = 2;                 // hard cap of new PDFs per sync
+    // Only START a new PDF if we're still under this much elapsed time. A single
+    // PDF can take ~3 min, so 2.5 min keeps the worst case (this + one more) safely
+    // under the 6-min wall: fast statements do 2 per sync, a slow first one falls
+    // back to 1 and queues the rest. An overrun would waste the run, so stay clear.
+    const PDF_TIME_BUDGET_MS  = 2.5 * 60 * 1000;
+    // Only consider PDFs emailed within this window. Batch-email a fresh stack and
+    // they all qualify; a years-old statement still sitting in your inbox won't get
+    // re-read. (CSV forwarding uses the wider GMAIL_QUERY window.)
+    const PDF_NEWER_THAN_DAYS = 7;
 
     // mode = 'all' | 'csv' | 'pdf' — controls which attachments get processed.
     // CSV is fast; PDF goes through Gemini and can take minutes. Buttons in the
     // app split these so users on one source aren't waiting for the other.
+    //
+    // Batch-friendly PDF handling:
+    //   - CSV rows are cheap, so they're regenerated from email on every pull.
+    //   - PDF rows are expensive (one Gemini call each) and can't be regenerated,
+    //     so once parsed they're PRESERVED in the sheet and never re-parsed. A
+    //     per-attachment registry (Settings → "ParsedPdfs") records what's done.
+    //   - Each sync parses up to MAX_PDFS_PER_SYNC *new* PDFs within a wall-clock
+    //     budget. Email a stack and click Sync PDF a few times — each click
+    //     advances through the queue.
+    // Returns a summary { ok, parsed, queued, ... } so the app can tell the user
+    // how many PDFs are still waiting.
     function pullStatements_(mode) {
       mode = mode || 'all';
       const includeCsv = (mode === 'all' || mode === 'csv');
       const includePdf = (mode === 'all' || mode === 'pdf');
+      const startMs = new Date().getTime();
 
       const ss = SpreadsheetApp.getActiveSpreadsheet();
       const sheet = ss.getSheetByName(T_RAW);
-      if (!sheet) return;
+      if (!sheet) return { ok: false, error: 'no Bank Statement tab' };
 
-      // Persistent "merged away" list — rows the user has explicitly
-      // chosen to hide via the Merge button. We skip these every time we
-      // pull statements so they don't keep coming back on each sync.
+      const h = HEADERS[T_RAW];
+
+      // Persistent "merged away" list — rows the user has explicitly hidden via
+      // the Merge button. Skipped on every pull so they don't keep coming back.
       const hiddenSet = getHiddenHashes_();
 
-      const threads = GmailApp.search(GMAIL_QUERY, 0, 30);
+      // Dedup + hidden filter, shared across CSV and PDF rows. Rows are
+      // header-keyed objects so both paths build the same shape.
       const collected = [];
       const seenHashes = new Set();
-      let csvCount = 0, pdfCount = 0, pdfTxCount = 0, pdfsParsed = 0;
+      const pushRow = (obj) => {
+        const hash = hashRow_(obj);
+        if (seenHashes.has(hash)) return;
+        if (hiddenSet.has(hash)) return;
+        seenHashes.add(hash);
+        collected.push(obj);
+      };
+
+      // Existing rows, split by source. PDF rows are preserved no matter what
+      // (we can't re-parse them cheaply); CSV rows are kept only when we're not
+      // regenerating them from email this pull.
+      const existing = readTab_(T_RAW);
+      const existingPdfRows = existing.filter(r => String(r.Source || '') === 'pdf');
+      const existingCsvRows = existing.filter(r => String(r.Source || '') !== 'pdf');
+
+      let csvCount = 0, pdfTxCount = 0, parsed = 0, queued = 0;
       const aiEnabled = includePdf && !!PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
 
-      for (const thread of threads) {
-        for (const msg of thread.getMessages()) {
-          for (const att of msg.getAttachments()) {
-            const name = (att.getName() || '').toLowerCase();
-            if (att.isGoogleType && att.isGoogleType()) continue;
-
-            // ---- CSV path (existing) ----
-            if (includeCsv && name.startsWith('account_statement') && name.endsWith('.csv')) {
+      // ---- CSV rows: regenerate from email, or carry over the old ones ----
+      if (includeCsv) {
+        const threads = GmailApp.search(GMAIL_QUERY, 0, 30);
+        for (const thread of threads) {
+          for (const msg of thread.getMessages()) {
+            for (const att of msg.getAttachments()) {
+              const name = (att.getName() || '').toLowerCase();
+              if (att.isGoogleType && att.isGoogleType()) continue;
+              if (!(name.startsWith('account_statement') && name.endsWith('.csv'))) continue;
               csvCount++;
               let csv;
               try { csv = Utilities.parseCsv(att.getDataAsString()); }
               catch (e) { Logger.log('CSV parse failed for ' + name + ': ' + e); continue; }
               if (csv.length < 2) continue;
-
               const idx = {};
-              csv[0].forEach((h, i) => { idx[String(h).trim()] = i; });
-
+              csv[0].forEach((c, i) => { idx[String(c).trim()] = i; });
               for (let r = 1; r < csv.length; r++) {
                 const row = csv[r];
-                const postingDate = row[idx['Posting Date']];
-                if (!postingDate) continue;
-                const out = HEADERS[T_RAW].map(h => {
-                  if (h === 'Nr') return '';
-                  if (idx[h] === undefined) return '';
-                  return row[idx[h]];
-                });
-                const desc = normalizeDesc_(row[idx['Original Description']] || row[idx['Description']]);
-                const mi = Number(row[idx['Money In']]) || 0;
-                const mo = Number(row[idx['Money Out']]) || 0;
-                const fe = Number(row[idx['Fee']]) || 0;
-                const txnDate = row[idx['Transaction Date']];
-                const hash = (txnDate || postingDate) + '|' + desc + '|' + (mi + mo + fe).toFixed(2);
-                if (seenHashes.has(hash)) continue;
-                if (hiddenSet.has(hash)) continue;  // user merged this away
-                seenHashes.add(hash);
-                collected.push(out);
+                if (!row[idx['Posting Date']]) continue;
+                const obj = {};
+                for (const col of h) {
+                  if (col === 'Nr') obj[col] = '';
+                  else if (col === 'Source') obj[col] = 'csv';
+                  else obj[col] = (idx[col] === undefined) ? '' : row[idx[col]];
+                }
+                pushRow(obj);
               }
-              continue;
             }
+          }
+        }
+      } else {
+        existingCsvRows.forEach(pushRow);
+      }
 
-            // ---- PDF path (AI-parsed) ----
-            if (name.endsWith('.pdf') && aiEnabled && isBankStatementPdf_(att, msg)) {
-              pdfCount++;
-              if (pdfsParsed >= MAX_PDFS_PER_SYNC) {
-                Logger.log('Skipping PDF (limit ' + MAX_PDFS_PER_SYNC + ' reached): ' + att.getName());
+      // ---- PDF rows: always preserve prior ones, optionally parse new ones ----
+      existingPdfRows.forEach(pushRow);
+
+      if (includePdf && aiEnabled) {
+        const parsedSet = getParsedPdfs_();
+        const cutoffMs = startMs - PDF_NEWER_THAN_DAYS * 86400000;
+        const threads = GmailApp.search(GMAIL_QUERY, 0, 30);
+        let registryDirty = false;
+        for (const thread of threads) {
+          for (const msg of thread.getMessages()) {
+            if (msg.getDate().getTime() < cutoffMs) continue;  // too old to bother
+            for (const att of msg.getAttachments()) {
+              const name = (att.getName() || '').toLowerCase();
+              if (att.isGoogleType && att.isGoogleType()) continue;
+              if (!name.endsWith('.pdf')) continue;
+              if (!isBankStatementPdf_(att, msg)) continue;
+              const key = pdfAttKey_(msg, att);
+              if (parsedSet.has(key)) continue;  // already parsed in a previous sync
+              // Out of budget? Leave it queued for the next Sync PDF click.
+              if (parsed >= MAX_PDFS_PER_SYNC || (new Date().getTime() - startMs) > PDF_TIME_BUDGET_MS) {
+                queued++;
                 continue;
               }
               Logger.log('Parsing PDF: ' + att.getName() + ' (' + Math.round(att.getSize() / 1024) + 'KB)');
@@ -242,51 +296,54 @@
                   const mi = Number(tx.moneyIn) || 0;
                   const mo = Number(tx.moneyOut) || 0;
                   const fe = Number(tx.fee) || 0;
-                  const desc = normalizeDesc_(tx.originalDescription || tx.description);
-                  const hash = (tx.transactionDate || tx.postingDate) + '|' + desc + '|' + (mi + mo + fe).toFixed(2);
-                  if (seenHashes.has(hash)) continue;
-                  if (hiddenSet.has(hash)) continue;  // user merged this away
-                  seenHashes.add(hash);
-                  const out = HEADERS[T_RAW].map(h => {
-                    if (h === 'Nr')                  return '';
-                    if (h === 'Account')             return String(tx.accountNumber || '').trim();
-                    if (h === 'Posting Date')        return tx.postingDate || '';
-                    if (h === 'Transaction Date')    return tx.transactionDate || tx.postingDate || '';
-                    if (h === 'Description')         return tx.description || '';
-                    if (h === 'Original Description')return tx.originalDescription || tx.description || '';
-                    if (h === 'Parent Category')     return '';
-                    if (h === 'Category')            return '';
-                    if (h === 'Money In')            return mi;
-                    if (h === 'Money Out')           return mo;
-                    if (h === 'Fee')                 return fe;
-                    if (h === 'Balance')             return Number(tx.balance) || 0;
-                    return '';
-                  });
-                  collected.push(out);
+                  const obj = {};
+                  for (const col of h) {
+                    if (col === 'Nr')                       obj[col] = '';
+                    else if (col === 'Source')              obj[col] = 'pdf';
+                    else if (col === 'Account')             obj[col] = String(tx.accountNumber || '').trim();
+                    else if (col === 'Posting Date')        obj[col] = tx.postingDate || '';
+                    else if (col === 'Transaction Date')    obj[col] = tx.transactionDate || tx.postingDate || '';
+                    else if (col === 'Description')         obj[col] = tx.description || '';
+                    else if (col === 'Original Description')obj[col] = tx.originalDescription || tx.description || '';
+                    else if (col === 'Money In')            obj[col] = mi;
+                    else if (col === 'Money Out')           obj[col] = mo;
+                    else if (col === 'Fee')                 obj[col] = fe;
+                    else if (col === 'Balance')             obj[col] = Number(tx.balance) || 0;
+                    else                                    obj[col] = '';
+                  }
+                  pushRow(obj);
                   pdfTxCount++;
                 }
-                pdfsParsed++;
+                parsedSet.add(key);
+                registryDirty = true;
+                parsed++;
               } catch (e) {
                 Logger.log('PDF parse failed for ' + name + ': ' + e);
+                // Not marked parsed → retried on the next sync.
               }
-              continue;
             }
           }
         }
+        if (registryDirty) writeParsedPdfs_(parsedSet);
       }
 
-      // Sort by Posting Date ascending, then assign Nr
-      const pdIdx = HEADERS[T_RAW].indexOf('Posting Date');
-      collected.sort((a, b) => String(a[pdIdx]).localeCompare(String(b[pdIdx])));
-      collected.forEach((row, i) => { row[0] = i + 1; });
+      // Sort by Posting Date ascending, then assign Nr and write.
+      collected.sort((a, b) => String(a['Posting Date']).localeCompare(String(b['Posting Date'])));
+      collected.forEach((obj, i) => { obj['Nr'] = i + 1; });
 
       sheet.clearContents();
-      const h = HEADERS[T_RAW];
       sheet.getRange(1, 1, 1, h.length).setValues([h]).setFontWeight('bold');
       if (collected.length) {
-        sheet.getRange(2, 1, collected.length, h.length).setValues(collected);
+        const arr = collected.map(obj => h.map(col => (obj[col] !== undefined ? obj[col] : '')));
+        sheet.getRange(2, 1, arr.length, h.length).setValues(arr);
       }
-      Logger.log('Pulled ' + collected.length + ' rows [mode=' + mode + ']. CSV files: ' + csvCount + ', PDF files: ' + pdfCount + ' (' + pdfTxCount + ' tx from AI parsing)' + (includePdf && !aiEnabled ? ' [AI disabled — set GEMINI_API_KEY]' : ''));
+
+      Logger.log('Pulled ' + collected.length + ' rows [mode=' + mode + ']. CSV files: ' + csvCount +
+                 ', PDFs parsed this sync: ' + parsed + ' (' + pdfTxCount + ' tx), queued: ' + queued +
+                 (includePdf && !aiEnabled ? ' [AI disabled — set GEMINI_API_KEY]' : ''));
+
+      return { ok: true, mode: mode, parsed: parsed, queued: queued,
+               csvFiles: csvCount, pdfTx: pdfTxCount, aiEnabled: aiEnabled };
     }
 
     // Decide whether a PDF looks like a bank statement worth sending to Gemini.
@@ -331,9 +388,9 @@
       try {
         // Reads / data pulls — handled inline because they don't need a body.
         if (action === 'load') return jsonOut_(loadAll_());
-        if (action === 'pull')     { pullStatements_('all'); return jsonOut_(loadAll_()); }
-        if (action === 'pull-csv') { pullStatements_('csv'); return jsonOut_(loadAll_()); }
-        if (action === 'pull-pdf') { pullStatements_('pdf'); return jsonOut_(loadAll_()); }
+        if (action === 'pull')     { const info = pullStatements_('all'); const out = loadAll_(); out.pullInfo = info; return jsonOut_(out); }
+        if (action === 'pull-csv') { const info = pullStatements_('csv'); const out = loadAll_(); out.pullInfo = info; return jsonOut_(out); }
+        if (action === 'pull-pdf') { const info = pullStatements_('pdf'); const out = loadAll_(); out.pullInfo = info; return jsonOut_(out); }
         if (action === 'ping') return jsonOut_({ ok: true, message: 'pong' });
 
         // Everything else routes through the shared dispatcher. State-changing
@@ -523,6 +580,46 @@
       const set = getHiddenHashes_();
       set.delete(String(hash));
       return writeHiddenHashes_(set);
+    }
+
+    // Parsed-PDF registry — which PDF attachments we've already sent to Gemini.
+    // Mirrors the HiddenHashes pattern: one Settings row "ParsedPdfs" holding a
+    // JSON array of attachment keys. Lets each Sync PDF advance through a batch
+    // instead of re-parsing (and re-charging for) the newest statement each time.
+    const SETTING_PARSED_PDFS = 'ParsedPdfs';
+
+    // Stable per-attachment key: message id + filename + byte size. Same PDF
+    // re-emailed in a new message counts as new (different message id) — fine,
+    // dedup by row hash still stops duplicate transactions reaching the sheet.
+    function pdfAttKey_(msg, att) {
+      return msg.getId() + '|' + (att.getName() || '') + '|' + att.getSize();
+    }
+
+    function getParsedPdfs_() {
+      const settings = readSettings_();
+      const raw = settings[SETTING_PARSED_PDFS];
+      if (!raw) return new Set();
+      try {
+        const arr = JSON.parse(String(raw));
+        return new Set(Array.isArray(arr) ? arr : []);
+      } catch (_) {
+        return new Set();
+      }
+    }
+
+    function writeParsedPdfs_(set) {
+      const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(T_SETTINGS);
+      if (!sheet) return { ok: false, error: 'no Settings tab' };
+      const data = sheet.getDataRange().getValues();
+      const json = JSON.stringify(Array.from(set));
+      for (let r = 1; r < data.length; r++) {
+        if (String(data[r][0] || '') === SETTING_PARSED_PDFS) {
+          sheet.getRange(r + 1, 2).setValue(json);
+          return { ok: true };
+        }
+      }
+      sheet.appendRow([SETTING_PARSED_PDFS, json]);
+      return { ok: true };
     }
 
     // Full-spectrum row removal — the nuclear option for a row the user has
