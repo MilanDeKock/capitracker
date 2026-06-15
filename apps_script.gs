@@ -305,6 +305,8 @@
                     else if (col === 'Transaction Date')    obj[col] = tx.transactionDate || tx.postingDate || '';
                     else if (col === 'Description')         obj[col] = tx.description || '';
                     else if (col === 'Original Description')obj[col] = tx.originalDescription || tx.description || '';
+                    else if (col === 'Parent Category')     obj[col] = String(tx.parentCategory || '').trim();
+                    else if (col === 'Category')            obj[col] = String(tx.category || '').trim();
                     else if (col === 'Money In')            obj[col] = mi;
                     else if (col === 'Money Out')           obj[col] = mo;
                     else if (col === 'Fee')                 obj[col] = fe;
@@ -1218,8 +1220,12 @@
       '- moneyOut (NEGATIVE number for debits/spending, 0 otherwise)',
       '- fee      (NEGATIVE number for fees, 0 otherwise)',
       '- balance  (running balance after the transaction)',
+      '- category (the per-transaction spending category the statement itself prints for that row — e.g. "Groceries", "Fuel", "Restaurants". ONLY use a value the statement actually shows; copy it verbatim. If the statement has no category column, return an empty string. Do NOT guess or invent a category from the merchant name.)',
+      '- parentCategory (a broader/parent grouping if the statement prints one above or alongside the category; empty string if there is none. Do NOT invent one.)',
       '',
       'Many SA banks present amounts as a single signed column (e.g. -100.00) or as "Debit" / "Credit" columns. Map them onto moneyIn / moneyOut / fee with the sign rules above, regardless of the source layout.',
+      '',
+      'category / parentCategory are OPTIONAL: most statements do not print categories at all. When in doubt, leave them as empty strings rather than guessing — a wrong category is worse than a blank one.',
       '',
       'Skip header rows, footer rows, page numbers, totals, summary lines, account holder details, and anything that is not an actual transaction.',
       '',
@@ -1240,6 +1246,8 @@
           transactionDate:     { type: 'STRING' },
           description:         { type: 'STRING' },
           originalDescription: { type: 'STRING' },
+          category:            { type: 'STRING' },
+          parentCategory:      { type: 'STRING' },
           moneyIn:             { type: 'NUMBER' },
           moneyOut:            { type: 'NUMBER' },
           fee:                 { type: 'NUMBER' },
