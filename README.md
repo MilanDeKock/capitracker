@@ -41,6 +41,9 @@ Bank emails CSV → Apps Script ingests → Google Sheet (canonical store)
 2. Extensions → Apps Script. Delete the placeholder `Code.gs`.
 3. Paste the contents of [`apps_script.gs`](apps_script.gs) into the editor.
 4. Change `SHARED_TOKEN` at the top to a long random string (~32 chars; any password generator works).
+
+   > **Recommended: store your token as a Script Property instead of in the code.** Apps Script editor → ⚙️ Project Settings → Script properties → add `SHARED_TOKEN` = your string. The script reads it from there first. Why bother? Anything hardcoded in the code gets **wiped when you paste a newer version of the script to update it** — keys in Script Properties survive. Your `GEMINI_API_KEY` (if you use AI PDF parsing) already lives there for the same reason. Keep both there and updates never cost you your keys.
+
 5. Save (Ctrl+S).
 6. Click **Deploy → New deployment → ⚙️ gear → Web app**.
    - Execute as: **Me**
@@ -77,6 +80,12 @@ If you'd rather skip the CSV-forwarding step entirely, Capitec emails monthly PD
 > **Batch parsing:** email a whole stack of PDF statements at once (anything received in the last 7 days is eligible). Each sync parses up to 2 new PDFs — already-parsed ones are remembered and never re-charged, so just click **Sync PDF (AI)** again after each run and CapiTracker works through the queue. The status line tells you how many are still waiting.
 
 **You can switch between CSV and PDF flows at any time.** Pick whichever fits your routine. Many users find PDF mode less effort once it's set up (Capitec auto-emails the statement; you just hit Sync PDF when you remember).
+
+### Updating the script later
+
+When a new version of `apps_script.gs` lands, paste it over the old code, save, then **Deploy → Manage deployments → ✏️ → New version → Deploy**.
+
+> **Keep your keys in Script Properties.** Pasting a new version overwrites everything in the code — so any secret you hardcoded (like `SHARED_TOKEN`) is wiped and the app stops connecting until you re-enter it. Secrets in **Script Properties** (⚙️ Project Settings → Script properties) are untouched by updates. Put `SHARED_TOKEN` and `GEMINI_API_KEY` there once and you never lose them on an update again.
 
 ## Features
 

@@ -10,8 +10,11 @@
     * SETUP (one-time, ~5 min):
     *   1. Create a new Google Sheet, name it (e.g.) "Budget Tracker 2026".
     *   2. Extensions → Apps Script. Delete the placeholder Code.gs. Paste this whole file.
-    *   3. Change SHARED_TOKEN below to a long random string of your choice.
-    *      (Any password generator works. ~32 chars. You'll paste the same string into the HTML.)
+    *   3. Set your SHARED_TOKEN — a long random string (~32 chars; any password
+    *      generator works). You'll paste the same string into the HTML's Setup tab.
+    *      RECOMMENDED: store it as a Script Property, not in the code below, so it
+    *      survives script updates — see "KEYS: STORE THEM AS PROPERTIES" below.
+    *      Quick alternative: just edit the SHARED_TOKEN constant below.
     *   4. Save (disk icon, Ctrl+S).
     *   5. Click "Deploy" → "New deployment" → gear icon → "Web app".
     *        Description:    anything
@@ -26,6 +29,25 @@
     *      into the budget tracker HTML's Setup tab.
     *   6. Close the Apps Script tab and reload the Sheet. onOpen() fires:
     *      tabs auto-create with sensible defaults, and Gmail starts getting pulled.
+    *
+    * KEYS: STORE THEM AS PROPERTIES (important — read this before updating):
+    *   Anything hardcoded in the code below (i.e. the SHARED_TOKEN constant) is
+    *   WIPED every time you paste a newer version of this script to update it.
+    *   Keys kept in Script Properties survive updates untouched. So store secrets
+    *   there, not in the code:
+    *     Apps Script editor → ⚙️ Project Settings → Script properties → Add:
+    *       SHARED_TOKEN   = <your long random string>
+    *       GEMINI_API_KEY = <your AIza... key>   (only if you use AI PDF parsing)
+    *   getSharedToken_() reads SHARED_TOKEN from Properties first, falling back to
+    *   the constant only if the Property is absent. GEMINI_API_KEY is ALWAYS read
+    *   from Properties (it never lives in code). Bonus: a token in Properties can
+    *   be rotated without redeploying — reads pick up the new value on each call.
+    *
+    * UPDATING THE SCRIPT LATER:
+    *   Paste the new version over the old, Save, then Deploy → Manage deployments
+    *   → ✏️ → New version → Deploy. If your keys are in Script Properties, that's
+    *   it — they're preserved. If you left SHARED_TOKEN in the constant, you must
+    *   re-enter it after every paste, or the app's requests start failing.
     */
 
     // ============================================================================
