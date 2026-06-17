@@ -1638,6 +1638,50 @@
       else Logger.log('Total: ' + count + ' PDF(s)');
     }
 
+    // Run from the editor (function dropdown → listPdfQueue → ▶) to see exactly
+    // what the next "Sync PDF" would do — WITHOUT calling Gemini (free, instant).
+    // Shows every bank-statement PDF in the window, whether it's already been
+    // parsed (in the ParsedPdfs registry), and which ones would parse vs queue.
+    // The fastest way to confirm batch handling is wired up correctly.
+    function listPdfQueue() {
+      const startMs = new Date().getTime();
+      const cutoffMs = startMs - PDF_NEWER_THAN_DAYS * 86400000;
+      const parsedSet = getParsedPdfs_();
+      const threads = GmailApp.search(GMAIL_QUERY, 0, 30);
+      let candidates = 0, alreadyDone = 0, wouldParse = 0, wouldQueue = 0;
+      Logger.log('PDF window: last ' + PDF_NEWER_THAN_DAYS + ' days. Cap: ' +
+                 MAX_PDFS_PER_SYNC + ' new PDF(s) per sync. Registry has ' +
+                 parsedSet.size + ' already-parsed PDF(s).');
+      Logger.log('---');
+      for (const thread of threads) {
+        for (const msg of thread.getMessages()) {
+          const tooOld = msg.getDate().getTime() < cutoffMs;
+          for (const att of msg.getAttachments()) {
+            const name = (att.getName() || '');
+            if (att.isGoogleType && att.isGoogleType()) continue;
+            if (!name.toLowerCase().endsWith('.pdf')) continue;
+            if (!isBankStatementPdf_(att, msg)) continue;
+            const sent = msg.getDate().toISOString().slice(0, 10);
+            if (tooOld) {
+              Logger.log('SKIP (older than window, sent ' + sent + '): ' + name);
+              continue;
+            }
+            candidates++;
+            const done = parsedSet.has(pdfAttKey_(msg, att));
+            let verdict;
+            if (done) { alreadyDone++; verdict = 'ALREADY PARSED (skipped)'; }
+            else if (wouldParse < MAX_PDFS_PER_SYNC) { wouldParse++; verdict = 'WOULD PARSE this sync'; }
+            else { wouldQueue++; verdict = 'WOULD QUEUE for next sync'; }
+            Logger.log(verdict + ' — ' + name + ' (' + Math.round(att.getSize() / 1024) + 'KB, sent ' + sent + ')');
+          }
+        }
+      }
+      Logger.log('---');
+      Logger.log('In window: ' + candidates + ' statement PDF(s). Already parsed: ' + alreadyDone +
+                 '. Would parse now: ' + wouldParse + '. Would queue: ' + wouldQueue + '.');
+      if (candidates === 0) Logger.log('Nothing to parse. Email yourself a statement PDF (last ' + PDF_NEWER_THAN_DAYS + ' days) and re-run.');
+    }
+
     // Run from the editor (function dropdown → testPdfParse → ▶). Picks the
     // most recent statement-looking PDF in your Gmail and parses it, logging
     // the result. No write to the Sheet — purely for verification.
