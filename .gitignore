@@ -1,9 +1,14 @@
 # Secrets — Web App URL and SHARED_TOKEN live here. Never commit.
 keys.txt
 
-# Personal bank statement CSVs
+# Personal bank statement CSVs and PDFs
 *.csv
 account_statement*.csv
+Bank PDF Satements/
+*.pdf
+
+# Local Claude Code session settings
+.claude/
 
 # OS junk
 Thumbs.db
