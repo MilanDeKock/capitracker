@@ -1791,6 +1791,46 @@ function amortizedDailyBurn(lineTxs, dailyBudget, todayISO, daysElapsed) {
   return consumed / daysElapsed;
 }
 
+// Single source of truth for "where will this line land by payday". Used by
+// the per-line forecast panels AND the Cashflow card, so the projection you
+// see when you expand a line is exactly the one committed against free cash.
+// Returns { projected, dailyBurn } or null when the line has no usable
+// forecast (no type set, or a petrol line without a live price / L-100 /
+// km-day) — callers fall back to plain budgeted-remainder.
+//
+// daily  — spend so far + the BUDGETED rate for the days not yet reached.
+//          We deliberately do NOT extrapolate the current rate forward: a
+//          slow/early start at R63/day shouldn't project "way under" by
+//          assuming you keep under-spending all month. `consumedSoFar` is the
+//          lump-smoothed spend (not raw `absActual`), so a big shop early
+//          still doesn't false-flag — the un-consumed stock is left to be
+//          covered by the budgeted forward rate. Floored at actual spend:
+//          you can't un-spend a late-cycle stockpile.
+// fixed  — the debit either happened (projection = what it actually cost)
+//          or it hasn't (projection = the budgeted amount).
+// petrol — live R/L price × your L/100 × km/day for the days left.
+function projectLine(line, absActual, { daysElapsed, daysLeft, daysInCycle, todayISO }, lineTxs, petrolPrice) {
+  const budgetAmt = line.amount || 0;
+  if (line.forecast === 'daily') {
+    const dailyBudget = daysInCycle > 0 ? budgetAmt / daysInCycle : 0;
+    const dailyBurn = (lineTxs && lineTxs.length)
+      ? amortizedDailyBurn(lineTxs, dailyBudget, todayISO, daysElapsed)
+      : (daysElapsed > 0 ? absActual / daysElapsed : 0);
+    const consumedSoFar = dailyBurn * daysElapsed;
+    return { projected: Math.max(absActual, consumedSoFar + dailyBudget * daysLeft), dailyBurn };
+  }
+  if (line.forecast === 'fixed') {
+    return { projected: absActual > 0 ? absActual : budgetAmt, dailyBurn: null };
+  }
+  if (line.forecast === 'petrol') {
+    const price = petrolPrice && petrolPrice.price;
+    if (!price || !line.l100 || !line.kmPerDay) return null;
+    const daily = price * (line.l100 / 100) * line.kmPerDay;
+    return { projected: absActual + daily * daysLeft, dailyBurn: daily };
+  }
+  return null;
+}
+
 function ForecastPanel({ line, actual, daysElapsed, daysLeft, daysInCycle, petrolPrice, petrolError, onFetchFuelHistory, lineTxs, todayISO }) {
   const type = line.forecast || '';
   const absActual = Math.abs(actual);
@@ -1798,20 +1838,7 @@ function ForecastPanel({ line, actual, daysElapsed, daysLeft, daysInCycle, petro
   const remaining = budgetAmt - absActual;
 
   if (type === 'daily') {
-    // Amortised rate so a single big shop doesn't read as a runaway burn.
-    const dailyBudget = daysInCycle > 0 ? budgetAmt / daysInCycle : 0;
-    const dailyBurn = (lineTxs && lineTxs.length)
-      ? amortizedDailyBurn(lineTxs, dailyBudget, todayISO, daysElapsed)
-      : (daysElapsed > 0 ? absActual / daysElapsed : 0);
-    // Projection = spend so far + the BUDGETED rate for the days not yet
-    // reached. We deliberately do NOT extrapolate the current rate forward: a
-    // slow/early start at R63/day shouldn't project "way under" by assuming you
-    // keep under-spending all month. `consumedSoFar` is the lump-smoothed spend
-    // (not raw `absActual`), so a big shop early still doesn't false-flag — the
-    // un-consumed stock is left to be covered by the budgeted forward rate.
-    // Floored at actual spend: you can't un-spend a late-cycle stockpile.
-    const consumedSoFar = dailyBurn * daysElapsed;
-    const projected = Math.max(absActual, consumedSoFar + dailyBudget * daysLeft);
+    const { projected, dailyBurn } = projectLine(line, absActual, { daysElapsed, daysLeft, daysInCycle, todayISO }, lineTxs, null);
     const projOverBy = projected - budgetAmt;
     return (
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
@@ -1932,9 +1959,10 @@ function Dashboard({ budget: defaultBudget, budgetOverrides, effectiveBudgetForC
 
   // Outstanding = future commitments still to leave the bank this cycle.
   // Overspend already came out of bank balance, so it's not added again here.
+  // This is the plain BUDGETED view; the forecast-adjusted version (which is
+  // what Free now actually uses) is computed further down, after the days
+  // helpers it depends on.
   const outstandingCommitments = budget.reduce((s, b) => s + Math.max(0, b.amount - (actuals[b.line] || 0)), 0);
-
-  const freeToSpend = cashPosition - outstandingCommitments;
 
   const latestSyncDate = latestBalances.reduce((d, b) => (b.date && b.date > d ? b.date : d), '');
 
@@ -1963,9 +1991,11 @@ function Dashboard({ budget: defaultBudget, budgetOverrides, effectiveBudgetForC
   // sa-fuel-api; for the Astron fallback, source='astron' and grade='p95Coastal'.
   const [petrolPrice, setPetrolPrice] = useState(null);
   const [petrolError, setPetrolError] = useState(null);
-  // Pull live coastal petrol price once per session when the user opens any
-  // petrol-forecast line. Cached server-side for 6h, so this only really
-  // hits the upstream sources a few times a day across all users.
+  // Pull live coastal petrol price once per session whenever any budget line
+  // uses the petrol forecast — the Cashflow card needs it up front (not just
+  // when a panel is expanded) to project petrol lines into Outstanding.
+  // Cached server-side for 6h, so this only really hits the upstream sources
+  // a few times a day across all users.
   // Drop the cached price if the user changes their fuel grade — otherwise
   // we'd keep showing the previous grade's price.
   useEffect(() => {
@@ -1975,9 +2005,8 @@ function Dashboard({ budget: defaultBudget, budgetOverrides, effectiveBudgetForC
     }
   }, [settings.fuelGrade, petrolPrice]);
   useEffect(() => {
-    if (!expandedBudgetLine || !onFetchPetrolPrice) return;
-    const exp = budget.find(b => b.line === expandedBudgetLine);
-    if (!exp || exp.forecast !== 'petrol' || petrolPrice || petrolError) return;
+    if (!onFetchPetrolPrice || !isCurrentCycle) return;
+    if (!budget.some(b => b.forecast === 'petrol') || petrolPrice || petrolError) return;
     let cancelled = false;
     (async () => {
       try {
@@ -1998,7 +2027,7 @@ function Dashboard({ budget: defaultBudget, budgetOverrides, effectiveBudgetForC
       }
     })();
     return () => { cancelled = true; };
-  }, [expandedBudgetLine, budget, petrolPrice, petrolError, onFetchPetrolPrice]);
+  }, [isCurrentCycle, budget, petrolPrice, petrolError, onFetchPetrolPrice]);
 
   // Days helpers — used by the daily-burn and petrol forecasts.
   const todayISO = toISO(new Date());
@@ -2024,6 +2053,30 @@ function Dashboard({ budget: defaultBudget, budgetOverrides, effectiveBudgetForC
     }
     return t.line === lineName ? [{ date: d, amount: Math.abs(t.amount) }] : [];
   });
+
+  // ===== Forecast-aware outstanding =====
+  // Where each line is expected to LAND by payday, not just what's budgeted.
+  // Lines with a forecast type commit their projected spend; lines without
+  // one (or a petrol line with no live price yet) conservatively commit the
+  // full budgeted remainder. Free now is based on this figure, so a food line
+  // projected to land R100 under budget releases that R100 to free cash — and
+  // a line burning hot reserves the expected overshoot instead of pretending
+  // the budget will hold.
+  const lineForecasts = budget.map(b => {
+    const act = actuals[b.line] || 0;
+    const spent = Math.abs(act);
+    const budgetOutstanding = Math.max(0, b.amount - act);
+    const proj = projectLine(b, spent, { daysElapsed, daysLeft, daysInCycle, todayISO },
+                             b.forecast === 'daily' ? lineSpendTxs(b.line) : null, petrolPrice);
+    const outstanding = proj ? Math.max(0, proj.projected - spent) : budgetOutstanding;
+    return { line: b.line, budget: b.amount, spent: act, projected: proj ? proj.projected : null, outstanding, budgetOutstanding };
+  });
+  const forecastOutstanding = lineForecasts.reduce((s, f) => s + f.outstanding, 0);
+  // Positive = the forecasts release cash vs the plain budget view;
+  // negative = expected overspend reserves extra.
+  const forecastDelta = outstandingCommitments - forecastOutstanding;
+  const freeToSpend = cashPosition - forecastOutstanding;
+
   // By-cycle table is collapsed by default — useful but noisy day-to-day.
   // Persist so the user's preference sticks across reloads.
   const [byCycleExpanded, _setByCycleExpanded] = useState(() => loadLS(K.byCycleExpanded, false));
@@ -2082,7 +2135,7 @@ function Dashboard({ budget: defaultBudget, budgetOverrides, effectiveBudgetForC
           <div className="px-5 py-3 border-b border-stone-200 flex items-center justify-between flex-wrap gap-2">
             <div>
               <h2 className="font-display text-lg">Cashflow</h2>
-              <div className="text-xs text-stone-500 mt-0.5">What's actually free to spend, after the bills still to leave the bank this cycle.</div>
+              <div className="text-xs text-stone-500 mt-0.5">What's actually free to spend, after the bills still to leave the bank this cycle. Lines with a forecast commit their projected spend, not the full budget.</div>
             </div>
             <button onClick={() => setCashflowExpanded(!cashflowExpanded)}
                     className="text-xs uppercase tracking-wider text-stone-500 hover:text-stone-900">
@@ -2149,13 +2202,19 @@ function Dashboard({ budget: defaultBudget, budgetOverrides, effectiveBudgetForC
             </div>
             <div className="bg-white px-5 py-4">
               <div className="text-xs uppercase tracking-wider text-stone-500 mb-1">Outstanding</div>
-              <div className={`text-2xl font-num text-stone-700 ${privateMode ? 'blur-sm select-none' : ''}`}>−{fmt(outstandingCommitments)}</div>
-              <div className="text-xs text-stone-500 mt-1">budgeted but unspent</div>
+              <div className={`text-2xl font-num text-stone-700 ${privateMode ? 'blur-sm select-none' : ''}`}>−{fmt(forecastOutstanding)}</div>
+              <div className="text-xs text-stone-500 mt-1">
+                {Math.abs(forecastDelta) >= 1
+                  ? (forecastDelta > 0
+                      ? <span>forecasts release <span className={`text-emerald-700 ${privateMode ? 'blur-sm select-none' : ''}`}>{fmt(forecastDelta)}</span> vs budgeted −{privateMode ? '···' : fmt(outstandingCommitments)}</span>
+                      : <span>forecasts reserve <span className={`text-red-700 ${privateMode ? 'blur-sm select-none' : ''}`}>{fmt(-forecastDelta)}</span> extra vs budgeted −{privateMode ? '···' : fmt(outstandingCommitments)}</span>)
+                  : 'still expected to leave the bank'}
+              </div>
             </div>
             <div className="bg-white px-5 py-4">
               <div className="text-xs uppercase tracking-wider text-stone-500 mb-1">Free now</div>
               <div className={`text-2xl font-num ${freeToSpend < 0 ? 'text-red-700' : 'text-emerald-700'} ${privateMode ? 'blur-sm select-none' : ''}`}>{fmt(freeToSpend)}</div>
-              <div className="text-xs text-stone-500 mt-1">cash minus commitments</div>
+              <div className="text-xs text-stone-500 mt-1">cash minus forecast commitments</div>
             </div>
           </div>
 
@@ -2210,30 +2269,41 @@ function Dashboard({ budget: defaultBudget, budgetOverrides, effectiveBudgetForC
               </div>
 
               <div>
-                <div className="text-xs uppercase tracking-wider text-stone-500 mb-2">Outstanding by budget line</div>
+                <div className="text-xs uppercase tracking-wider text-stone-500 mb-2 flex items-center justify-between flex-wrap gap-2">
+                  <span>Outstanding by budget line</span>
+                  <span className="normal-case tracking-normal text-stone-500 text-[11px]">Lines with a forecast commit "lands ~" minus spent; others commit the full budgeted remainder.</span>
+                </div>
                 <table className="w-full text-sm">
                   <tbody>
-                    {budget.map(b => {
-                      const act = actuals[b.line] || 0;
-                      const remaining = b.amount - act;
-                      if (b.amount === 0 && act === 0) return null;
+                    {lineForecasts.map(f => {
+                      if (f.budget === 0 && f.spent === 0) return null;
+                      const freed = f.projected != null ? f.budgetOutstanding - f.outstanding : 0;
                       return (
-                        <tr key={b.line} className="border-b border-stone-100 text-xs">
-                          <td className="py-1.5 text-stone-700">{b.line}</td>
-                          <td className={`py-1.5 text-right font-num text-stone-500 ${privateMode ? 'blur-sm select-none' : ''}`}>R{b.amount.toLocaleString('en-ZA')} budget</td>
-                          <td className={`py-1.5 text-right font-num text-stone-500 ${privateMode ? 'blur-sm select-none' : ''}`}>{fmt(act)} spent</td>
-                          <td className={`py-1.5 text-right font-num font-medium ${remaining < 0 ? 'text-red-700' : remaining > 0 ? 'text-stone-900' : 'text-stone-500'} ${privateMode ? 'blur-sm select-none' : ''}`}>
-                            {remaining > 0 ? `${fmt(remaining)} still due` : remaining < 0 ? `${fmt(Math.abs(remaining))} over` : '—'}
+                        <tr key={f.line} className="border-b border-stone-100 text-xs">
+                          <td className="py-1.5 text-stone-700">{f.line}</td>
+                          <td className={`py-1.5 text-right font-num text-stone-500 ${privateMode ? 'blur-sm select-none' : ''}`}>R{f.budget.toLocaleString('en-ZA')} budget</td>
+                          <td className={`py-1.5 text-right font-num text-stone-500 ${privateMode ? 'blur-sm select-none' : ''}`}>{fmt(f.spent)} spent</td>
+                          <td className={`py-1.5 text-right font-num ${privateMode ? 'blur-sm select-none' : ''} ${f.projected == null ? 'text-stone-400' : f.projected > f.budget ? 'text-red-700' : 'text-emerald-700'}`}
+                              title={f.projected != null && Math.abs(freed) >= 1 ? (freed > 0 ? `forecast frees ${fmt(freed)} vs budget` : `forecast reserves ${fmt(-freed)} extra`) : ''}>
+                            {f.projected != null ? `lands ~${fmt(f.projected)}` : '—'}
+                          </td>
+                          <td className={`py-1.5 text-right font-num font-medium ${f.spent > f.budget ? 'text-red-700' : f.outstanding > 0 ? 'text-stone-900' : 'text-stone-500'} ${privateMode ? 'blur-sm select-none' : ''}`}>
+                            {f.outstanding > 0 ? `${fmt(f.outstanding)} still due` : f.spent > f.budget ? `${fmt(f.spent - f.budget)} over` : '—'}
                           </td>
                         </tr>
                       );
                     })}
                     <tr className="font-medium bg-stone-50 text-xs">
-                      <td className="py-2 pl-1">Total outstanding (under-budget lines only)</td><td></td><td></td>
-                      <td className={`py-2 text-right font-num ${privateMode ? 'blur-sm select-none' : ''}`}>{fmt(outstandingCommitments)}</td>
+                      <td className="py-2 pl-1">Total outstanding (forecast-adjusted)</td><td></td><td></td><td></td>
+                      <td className={`py-2 text-right font-num ${privateMode ? 'blur-sm select-none' : ''}`}>{fmt(forecastOutstanding)}</td>
                     </tr>
                   </tbody>
                 </table>
+                {Math.abs(forecastDelta) >= 1 && (
+                  <div className={`text-[11px] text-stone-500 mt-2 ${privateMode ? 'blur-sm select-none' : ''}`}>
+                    Plain budgeted outstanding is {fmt(outstandingCommitments)} — line forecasts {forecastDelta > 0 ? `release ${fmt(forecastDelta)} back to free cash` : `reserve an extra ${fmt(-forecastDelta)}`}.
+                  </div>
+                )}
               </div>
 
               {latestSyncDate && (
