@@ -1798,14 +1798,19 @@ function amortizedDailyBurn(lineTxs, dailyBudget, todayISO, daysElapsed) {
 // forecast (no type set, or a petrol line without a live price / L-100 /
 // km-day) — callers fall back to plain budgeted-remainder.
 //
-// daily  — spend so far + the BUDGETED rate for the days not yet reached.
-//          We deliberately do NOT extrapolate the current rate forward: a
-//          slow/early start at R63/day shouldn't project "way under" by
-//          assuming you keep under-spending all month. `consumedSoFar` is the
-//          lump-smoothed spend (not raw `absActual`), so a big shop early
-//          still doesn't false-flag — the un-consumed stock is left to be
-//          covered by the budgeted forward rate. Floored at actual spend:
-//          you can't un-spend a late-cycle stockpile.
+// daily  — lump-smoothed spend + a FADING credit for stock on hand + the
+//          BUDGETED rate for the days not yet reached. We deliberately do NOT
+//          extrapolate the current rate forward: a slow/early start at
+//          R63/day shouldn't project "way under" by assuming you keep
+//          under-spending all month. `consumedSoFar` is the lump-smoothed
+//          spend (not raw `absActual`), so a big shop early doesn't
+//          false-flag. But un-eaten stock only offsets purchases that would
+//          otherwise happen INSIDE this cycle — a pantry filled near payday
+//          mostly feeds next cycle, and the pre-payday week shop still
+//          happens. So the stock credit fades linearly over the cycle:
+//          full credit on day 1, none by payday (where the projection
+//          converges to actual spend). Floored at actual spend: you can't
+//          un-spend a late-cycle stockpile.
 // fixed  — the debit either happened (projection = what it actually cost)
 //          or it hasn't (projection = the budgeted amount).
 // petrol — live R/L price × your L/100 × km/day for the days left.
@@ -1817,7 +1822,11 @@ function projectLine(line, absActual, { daysElapsed, daysLeft, daysInCycle, toda
       ? amortizedDailyBurn(lineTxs, dailyBudget, todayISO, daysElapsed)
       : (daysElapsed > 0 ? absActual / daysElapsed : 0);
     const consumedSoFar = dailyBurn * daysElapsed;
-    return { projected: Math.max(absActual, consumedSoFar + dailyBudget * daysLeft), dailyBurn };
+    // Stock on hand = cash out that hasn't been "eaten" yet. Its credit
+    // against future buying fades as payday nears (see comment above).
+    const stock = Math.max(0, absActual - consumedSoFar);
+    const cycleFrac = daysInCycle > 0 ? daysElapsed / daysInCycle : 1;
+    return { projected: Math.max(absActual, consumedSoFar + stock * cycleFrac + dailyBudget * daysLeft), dailyBurn };
   }
   if (line.forecast === 'fixed') {
     return { projected: absActual > 0 ? absActual : budgetAmt, dailyBurn: null };
