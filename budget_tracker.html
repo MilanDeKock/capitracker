@@ -654,7 +654,10 @@ function BudgetTracker() {
         description: t.description, originalDesc: t.originalDesc,
         parentCategory: t.parentCategory, bankCategory: t.bankCategory,
         moneyIn: t.moneyIn, moneyOut: t.moneyOut, fee: t.fee, amount: t.amount,
-        line: t.line, postedAt: now,
+        // Carry the cycle override + splits into local state too. denormalizeRow
+        // already writes these to the Sheet; omitting them here made the override
+        // vanish right after posting and then "reappear" on the next full sync.
+        line: t.line, splits: t.splits || null, budgetDate: t.budgetDate || null, postedAt: now,
       }));
       const nextHistory = [...history, ...appended];
       setHistory(nextHistory);
@@ -2515,15 +2518,19 @@ function Transactions({ allTxs, lineNames, overrides, setOverride, clearOverride
   const [splitModalTx, setSplitModalTx] = useState(null);
   const [cycleEditorTx, setCycleEditorTx] = useState(null);
 
+  // Cycle options + filter key off the EFFECTIVE date (budgetDate || date), so a
+  // row moved into another cycle lists and filters under the cycle it actually
+  // counts toward — matching its chip and all the dashboard/budget math. Keying
+  // off the natural posting date would hide overridden rows from their new cycle.
   const cycles = useMemo(() => {
     const s = new Set();
-    for (const t of allTxs) if (t.date) s.add(cycleKey(t.date, anchorDay));
+    for (const t of allTxs) if (effectiveDate(t)) s.add(cycleKey(effectiveDate(t), anchorDay));
     return Array.from(s).sort().reverse();
   }, [allTxs, anchorDay]);
 
   const filtered = useMemo(() => allTxs
     .filter(t => !filterLine   || t.line === filterLine)
-    .filter(t => !filterCycle  || cycleKey(t.date, anchorDay) === filterCycle)
+    .filter(t => !filterCycle  || cycleKey(effectiveDate(t), anchorDay) === filterCycle)
     .filter(t => !filterStatus || (filterStatus === 'new' && !t.inHistory) || (filterStatus === 'history' && t.inHistory))
     .filter(t => !search       || (t.description || '').toLowerCase().includes(search.toLowerCase()) || (t.originalDesc || '').toLowerCase().includes(search.toLowerCase())),
     [allTxs, filterLine, filterCycle, filterStatus, search, anchorDay]);
