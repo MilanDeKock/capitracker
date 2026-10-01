@@ -1924,55 +1924,86 @@
     function handleTelegramUpdate_(update) {
       const noOp = ContentService.createTextOutput('').setMimeType(ContentService.MimeType.TEXT);
       try {
-        const chatId = update.message && update.message.chat && update.message.chat.id;
-        const text = (update.message && update.message.text || '').trim();
-        if (!chatId || !text) return noOp;
-
         const props = PropertiesService.getScriptProperties();
         const botToken      = props.getProperty('TELEGRAM_BOT_TOKEN');
         const allowedChatId = props.getProperty('TELEGRAM_CHAT_ID');
-
         if (!botToken) {
           Logger.log('Telegram update received but TELEGRAM_BOT_TOKEN not set');
           return noOp;
         }
 
-        // /start or /id — echo the chat ID so the user can authorize themselves.
+        // ---- Inline-button taps arrive as callback_query, not message ----
+        if (update.callback_query) {
+          const cq = update.callback_query;
+          const cqChat = cq.message && cq.message.chat && cq.message.chat.id;
+          if (!allowedChatId || String(cqChat) !== String(allowedChatId)) {
+            answerCallbackQuery_(botToken, cq.id, 'Not authorised');
+            return noOp;
+          }
+          tgHandleCallback_(botToken, cq);
+          return noOp;
+        }
+
+        const msg = update.message;
+        const chatId = msg && msg.chat && msg.chat.id;
+        if (!chatId) return noOp;
+        const text = String(msg.text || '').trim();
+
+        // /start or /id — echo the chat ID so the user can authorise themselves.
         if (text === '/start' || text === '/id') {
           sendTelegramMessage_(botToken, chatId,
-            'Your Telegram chat ID is: `' + chatId + '`\n\n' +
-            'Add this to Apps Script → Project Settings → Script properties as ' +
-            '`TELEGRAM_CHAT_ID` to authorize this chat. ' +
-            'Then send another message to start chatting with your budget.');
+            'Chat ID: `' + chatId + '`\n' +
+            'Add it as `TELEGRAM_CHAT_ID` in Apps Script → Project Settings → Script properties to authorise this chat.');
           return noOp;
         }
 
         // Auth gate — only respond to the configured chat.
         if (!allowedChatId || String(chatId) !== String(allowedChatId)) {
           sendTelegramMessage_(botToken, chatId,
-            '⛔ Not authorised. The bot owner needs to add chat id `' + chatId +
-            '` to Script Properties.');
+            '⛔ Not authorised. Add chat id `' + chatId + '` to Script Properties.');
           return noOp;
         }
 
-        // /help — usage hint.
-        if (text === '/help') {
+        // ---- A bank-statement CSV shared into the chat → import it ----
+        if (msg.document) {
+          tgImportCsvDocument_(botToken, chatId, msg.document);
+          return noOp;
+        }
+
+        if (!text) return noOp;
+        const lower = text.toLowerCase();
+
+        if (lower === '/help' || lower === '/start@') {
           sendTelegramMessage_(botToken, chatId,
-            'Ask me about your budget in plain English. Examples:\n' +
-            '• "how much left on Kos?"\n' +
-            '• "what did I spend most on this cycle?"\n' +
-            '• "am I on track for petrol?"\n' +
-            '• "what\'s my biggest transaction in eating out?"');
+            '*CapiTracker*\n' +
+            '/cashflow — where you stand this cycle\n' +
+            '/review — tag uncategorised transactions\n' +
+            '/budget — show this cycle\'s budgets\n' +
+            '/budget <line> <amount> — set one\n' +
+            'Share a Capitec *.csv* to import it.\n' +
+            'Or just ask, e.g. "how much left on groceries?"');
+          return noOp;
+        }
+        if (lower === '/cashflow' || lower === '/left' || lower === '/flow') {
+          sendTelegramMessage_(botToken, chatId, tgCashflow_());
+          return noOp;
+        }
+        if (lower === '/review' || lower === '/classify') {
+          tgClearSkips_();
+          tgSendNextReview_(botToken, chatId);
+          return noOp;
+        }
+        if (lower === '/budget' || lower.indexOf('/budget ') === 0) {
+          sendTelegramMessage_(botToken, chatId, tgSetBudget_(text.slice(7).trim()));
           return noOp;
         }
 
-        // Build the same context the in-app chat uses, then ask Gemini.
+        // ---- Natural-language fallback → Gemini (same context as in-app chat) ----
         const ctx = buildBudgetContextForChat_();
         ctx.channel = 'telegram';
         const result = chatWithGemini_([{ role: 'user', text: text }], ctx);
-        const reply = (result && result.message) || 'Sorry, I had trouble answering that.';
-
-        sendTelegramMessage_(botToken, chatId, reply);
+        sendTelegramMessage_(botToken, chatId,
+          (result && result.message) || 'Sorry, I had trouble answering that.');
         return noOp;
       } catch (e) {
         Logger.log('Telegram handler error: ' + e + '\n' + (e && e.stack));
@@ -1994,6 +2025,376 @@
         }),
         muteHttpExceptions: true,
       });
+    }
+
+    // ============================================================================
+    // TELEGRAM BOT — CSV import, inline-button classify, /cashflow, /budget
+    // Everything here is driven from handleTelegramUpdate_ and writes through the
+    // same Sheet helpers the web app uses (appendHistory_, updateHistoryLine_,
+    // overwriteTab_) so the bot and the app never disagree.
+    // ============================================================================
+
+    // Strip Telegram-Markdown control chars from dynamic text (bank descriptions,
+    // user line names) so an underscore/asterisk in the data can't break a send.
+    function tgMdSafe_(s) {
+      return String(s || '').replace(/[_*`\[\]]/g, ' ').trim();
+    }
+
+    // ZAR, en-ZA thousands with a space, no decimals. Sign preserved (- = spend).
+    function tgFmtZar_(n) {
+      const v = Math.round(Math.abs(Number(n) || 0));
+      const grouped = String(v).replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
+      return (Number(n) < 0 ? '-R' : 'R') + grouped;
+    }
+
+    function answerCallbackQuery_(botToken, cbId, text) {
+      UrlFetchApp.fetch('https://api.telegram.org/bot' + botToken + '/answerCallbackQuery', {
+        method: 'post', contentType: 'application/json',
+        payload: JSON.stringify({ callback_query_id: cbId, text: text || '' }),
+        muteHttpExceptions: true,
+      });
+    }
+
+    function sendTelegramKeyboard_(botToken, chatId, text, inlineKeyboard) {
+      UrlFetchApp.fetch('https://api.telegram.org/bot' + botToken + '/sendMessage', {
+        method: 'post', contentType: 'application/json',
+        payload: JSON.stringify({
+          chat_id: chatId,
+          text: String(text || '').slice(0, 4000),
+          parse_mode: 'Markdown',
+          reply_markup: { inline_keyboard: inlineKeyboard },
+        }),
+        muteHttpExceptions: true,
+      });
+    }
+
+    function editTelegramText_(botToken, chatId, messageId, text) {
+      UrlFetchApp.fetch('https://api.telegram.org/bot' + botToken + '/editMessageText', {
+        method: 'post', contentType: 'application/json',
+        payload: JSON.stringify({
+          chat_id: chatId, message_id: messageId,
+          text: String(text || '').slice(0, 4000), parse_mode: 'Markdown',
+        }),
+        muteHttpExceptions: true,
+      });
+    }
+
+    // Current pay cycle from the Anchor Day setting (same math as the dashboard).
+    function currentCycle_() {
+      const settings = readSettings_();
+      const anchorDay = Number(settings['Anchor Day']) || 25;
+      const tz = Session.getScriptTimeZone();
+      const today = new Date();
+      const day = today.getDate();
+      const m = day >= anchorDay ? today.getMonth() : today.getMonth() - 1;
+      const startDate = new Date(today.getFullYear(), m, anchorDay);
+      const endDate   = new Date(today.getFullYear(), m + 1, anchorDay - 1);
+      return {
+        anchorDay, tz, today, startDate, endDate,
+        start: Utilities.formatDate(startDate, tz, 'yyyy-MM-dd'),
+        end:   Utilities.formatDate(endDate,   tz, 'yyyy-MM-dd'),
+      };
+    }
+
+    // Server-side port of the web app's classify() — maps a raw CSV row to a
+    // budget Line using the Rules tab. Returns 'Review' when nothing matches.
+    function tgClassifyRow_(obj, rules) {
+      const amount = (Number(obj['Money In']) || 0) + (Number(obj['Money Out']) || 0) + (Number(obj['Fee']) || 0);
+      if (amount > 0) return String(obj['Category'] || '') === 'Salary' ? 'Salary' : 'Other Income';
+      const desc = String(obj['Description'] || '').toLowerCase();
+      const orig = String(obj['Original Description'] || '').toLowerCase();
+      const cat  = String(obj['Category'] || '');
+      const pcat = String(obj['Parent Category'] || '');
+      for (const r of rules) {
+        const type = String(r.Type || '');
+        const val  = String(r.Value || '');
+        const lval = val.toLowerCase();
+        if (type === 'desc' && lval && (desc.indexOf(lval) >= 0 || orig.indexOf(lval) >= 0)) return r.Line;
+        if (type === 'cat'  && cat  === val) return r.Line;
+        if (type === 'pcat' && pcat === val) return r.Line;
+      }
+      return 'Review';
+    }
+
+    // 10-hex-char fingerprint of a full row hash — short enough for Telegram's
+    // 64-byte callback_data budget, resolved back to the full hash at tap time.
+    function tgShortHash_(fullHash) {
+      const bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, fullHash);
+      let hex = '';
+      for (let i = 0; i < 5; i++) hex += ('0' + ((bytes[i] + 256) % 256).toString(16)).slice(-2);
+      return hex;
+    }
+
+    function tgBudgetLineNames_() {
+      return readTab_(T_BUDGET).map(r => String(r.Line || '')).filter(Boolean);
+    }
+
+    // Transactions still needing a category: Line empty or 'Review', no splits.
+    function tgReviewPending_() {
+      const out = [];
+      for (const t of readTab_(T_HISTORY)) {
+        if (String(t.Splits || '').trim()) continue;
+        // Pending rows change when they clear (date + description shift), so the
+        // bot never shows them — merge/split stays in the browser. Settled-only.
+        if (isPendingDesc_(t['Original Description']) || isPendingDesc_(t.Description)) continue;
+        const line = String(t.Line || '').trim();
+        if (line && line !== 'Review') continue;
+        const hash = hashRow_(t);
+        out.push({
+          hash, short: tgShortHash_(hash),
+          desc: String(t.Description || t['Original Description'] || '').trim(),
+          amount: (Number(t['Money In']) || 0) + (Number(t['Money Out']) || 0) + (Number(t['Fee']) || 0),
+          date: String(t['Posting Date'] || '').slice(0, 10),
+        });
+      }
+      out.sort((a, b) => String(b.date).localeCompare(String(a.date)));
+      return out;
+    }
+
+    // Skipped-this-session rows live in CacheService so /review can move past
+    // them without re-prompting, and revisit them on the next fresh /review.
+    function tgSkipSet_() {
+      const raw = CacheService.getScriptCache().get('tg_review_skips');
+      if (!raw) return [];
+      try { const a = JSON.parse(raw); return Array.isArray(a) ? a : []; } catch (_) { return []; }
+    }
+    function tgAddSkip_(short) {
+      const set = tgSkipSet_();
+      if (set.indexOf(short) < 0) set.push(short);
+      CacheService.getScriptCache().put('tg_review_skips', JSON.stringify(set), 3600);
+    }
+    function tgClearSkips_() { CacheService.getScriptCache().remove('tg_review_skips'); }
+
+    // Send the next untagged transaction with a tap-to-classify keyboard.
+    function tgSendNextReview_(botToken, chatId) {
+      const skips = tgSkipSet_();
+      const pending = tgReviewPending_().filter(p => skips.indexOf(p.short) < 0);
+      if (!pending.length) {
+        const nSkip = skips.length;
+        sendTelegramMessage_(botToken, chatId,
+          nSkip ? ('✅ Done — ' + nSkip + ' skipped. /review to revisit.')
+                : '✅ Nothing to tag — all classified.');
+        return;
+      }
+      const p = pending[0];
+      const names = tgBudgetLineNames_();
+      const kb = [];
+      let row = [];
+      names.forEach((ln, i) => {
+        row.push({ text: tgMdSafe_(ln) || ('line ' + i), callback_data: 'c|' + p.short + '|' + i });
+        if (row.length === 2) { kb.push(row); row = []; }
+      });
+      if (row.length) kb.push(row);
+      kb.push([{ text: '⏭ Skip', callback_data: 'c|' + p.short + '|skip' }]);
+
+      const header = pending.length > 1 ? ('*Tag* — ' + pending.length + ' left') : '*Tag* — last one';
+      sendTelegramKeyboard_(botToken, chatId,
+        header + '\n' + (p.date ? p.date + '  ' : '') + tgMdSafe_(p.desc) + '\n' + tgFmtZar_(p.amount),
+        kb);
+    }
+
+    // Handle a classify/skip button tap.
+    function tgHandleCallback_(botToken, cq) {
+      const data = String(cq.data || '');
+      const chatId = cq.message && cq.message.chat && cq.message.chat.id;
+      const messageId = cq.message && cq.message.message_id;
+      const parts = data.split('|');
+      if (parts[0] !== 'c') { answerCallbackQuery_(botToken, cq.id, ''); return; }
+      const short = parts[1];
+      const sel = parts[2];
+
+      const match = tgReviewPending_().find(p => p.short === short);
+
+      if (sel === 'skip') {
+        tgAddSkip_(short);
+        answerCallbackQuery_(botToken, cq.id, 'Skipped');
+        if (messageId) editTelegramText_(botToken, chatId, messageId,
+          '⏭ Skipped' + (match ? (': ' + tgMdSafe_(match.desc)) : ''));
+        tgSendNextReview_(botToken, chatId);
+        return;
+      }
+
+      if (!match) {
+        answerCallbackQuery_(botToken, cq.id, 'Already handled');
+        if (messageId) editTelegramText_(botToken, chatId, messageId, '✓ Already tagged.');
+        return;
+      }
+
+      const line = tgBudgetLineNames_()[Number(sel)];
+      if (!line) { answerCallbackQuery_(botToken, cq.id, 'Unknown line'); return; }
+
+      const res = updateHistoryLine_(match.hash, line);
+      if (res && res.ok) {
+        answerCallbackQuery_(botToken, cq.id, 'Tagged ' + line);
+        if (messageId) editTelegramText_(botToken, chatId, messageId,
+          '✓ ' + tgMdSafe_(match.desc) + ' → *' + tgMdSafe_(line) + '*');
+        tgSendNextReview_(botToken, chatId);
+      } else {
+        answerCallbackQuery_(botToken, cq.id, 'Failed: ' + (res && res.error));
+      }
+    }
+
+    // Download a CSV shared into the chat, classify each row with the Rules tab,
+    // and append to Transactions. appendHistory_ dedupes by row-hash, so re-sends
+    // and overlap with Gmail pulls never create duplicates.
+    function tgImportCsvDocument_(botToken, chatId, document) {
+      const name = String(document.file_name || '').toLowerCase();
+      const mime = String(document.mime_type || '');
+      if (!(name.endsWith('.csv') || mime.indexOf('csv') >= 0)) {
+        sendTelegramMessage_(botToken, chatId, 'Send me a *.csv* bank statement to import.');
+        return;
+      }
+
+      let filePath;
+      try {
+        const r = UrlFetchApp.fetch('https://api.telegram.org/bot' + botToken +
+          '/getFile?file_id=' + encodeURIComponent(document.file_id), { muteHttpExceptions: true });
+        const j = JSON.parse(r.getContentText());
+        if (!j.ok) throw new Error(j.description || 'getFile failed');
+        filePath = j.result.file_path;
+      } catch (e) {
+        sendTelegramMessage_(botToken, chatId, '⚠️ Could not fetch that file: ' + e);
+        return;
+      }
+
+      let content;
+      try {
+        content = UrlFetchApp.fetch('https://api.telegram.org/file/bot' + botToken + '/' + filePath,
+          { muteHttpExceptions: true }).getContentText();
+      } catch (e) {
+        sendTelegramMessage_(botToken, chatId, '⚠️ Download failed: ' + e);
+        return;
+      }
+
+      let csv;
+      try { csv = Utilities.parseCsv(content); }
+      catch (e) { sendTelegramMessage_(botToken, chatId, '⚠️ That was not valid CSV.'); return; }
+      if (!csv || csv.length < 2) { sendTelegramMessage_(botToken, chatId, 'That CSV had no rows.'); return; }
+
+      const idx = {};
+      csv[0].forEach((c, i) => { idx[String(c).trim()] = i; });
+      if (idx['Posting Date'] === undefined) {
+        sendTelegramMessage_(botToken, chatId,
+          '⚠️ Unexpected columns. Needs a Capitec-style export (Posting Date, Description, Money In/Out…).');
+        return;
+      }
+
+      const rules = readTab_(T_RULES);
+      const bankCols = ['Account', 'Posting Date', 'Transaction Date', 'Description',
+        'Original Description', 'Parent Category', 'Category', 'Money In', 'Money Out', 'Fee'];
+      const rows = [];
+      let pendingHeld = 0;
+      for (let r = 1; r < csv.length; r++) {
+        const row = csv[r];
+        if (!row[idx['Posting Date']]) continue;
+        const obj = {};
+        bankCols.forEach(col => { obj[col] = (idx[col] === undefined) ? '' : row[idx[col]]; });
+        // Hold pending rows back — they'll import cleanly once they settle on a
+        // later statement, so the bot never deals with merge/split.
+        if (isPendingDesc_(obj['Original Description']) || isPendingDesc_(obj['Description'])) {
+          pendingHeld++;
+          continue;
+        }
+        obj['Line'] = tgClassifyRow_(obj, rules);
+        obj['Splits'] = '';
+        obj['Budget Date'] = '';
+        rows.push(obj);
+      }
+      if (!rows.length) {
+        let none = 'No new transactions found in that CSV.';
+        if (pendingHeld) none += '\n' + pendingHeld + ' still pending — held until they settle.';
+        sendTelegramMessage_(botToken, chatId, none);
+        return;
+      }
+
+      const res = appendHistory_(rows);
+      const added = (res && res.appended) || 0;
+      const dupes = rows.length - added;
+
+      let txt = '📥 Imported *' + added + '* new';
+      if (dupes) txt += ' · ' + dupes + ' already in';
+      if (pendingHeld) txt += ' · ' + pendingHeld + ' pending held';
+      txt += '.';
+
+      if (added) {
+        tgClearSkips_();
+        const pend = tgReviewPending_();
+        if (pend.length) txt += '\n' + pend.length + ' need a category.';
+        sendTelegramMessage_(botToken, chatId, txt);
+        if (pend.length) tgSendNextReview_(botToken, chatId);
+      } else {
+        sendTelegramMessage_(botToken, chatId, txt);
+      }
+    }
+
+    // Deterministic cashflow snapshot — exact numbers from the same cycle math the
+    // dashboard uses, no LLM in the loop.
+    function tgCashflow_() {
+      const ctx = buildBudgetContextForChat_();
+      const cyc = currentCycle_();
+      let budgeted = 0, spent = 0;
+      const over = [];
+      for (const s of (ctx.lineSummary || [])) {
+        const b = Number(s.budget) || 0, sp = Number(s.spent) || 0;
+        budgeted += b;
+        if (sp > 0) spent += sp;
+        if (b > 0 && (b - sp) < 0) over.push({ line: s.line, by: sp - b });
+      }
+      const left = budgeted - spent;
+      const daysLeft = Math.max(0, Math.ceil((cyc.endDate.getTime() - cyc.today.getTime()) / 86400000));
+      const pct = budgeted > 0 ? Math.round(spent / budgeted * 100) : 0;
+
+      const out = [];
+      out.push('*Cashflow* ' + ctx.windowFrom + ' → ' + ctx.windowTo);
+      out.push('Budgeted  ' + tgFmtZar_(budgeted));
+      out.push('Spent     ' + tgFmtZar_(spent) + '  (' + pct + '%)');
+      out.push((left >= 0 ? 'Left      ' : 'Over      ') + tgFmtZar_(Math.abs(left)));
+      out.push(daysLeft + ' days left');
+      if (over.length) {
+        over.sort((a, b) => b.by - a.by);
+        out.push('');
+        out.push('⚠️ Over: ' + over.slice(0, 4).map(o => tgMdSafe_(o.line) + ' ' + tgFmtZar_(-o.by)).join(', '));
+      }
+      return out.join('\n');
+    }
+
+    // /budget  → list this cycle's effective budgets.
+    // /budget <line> <amount> → upsert a Budget Overrides row for the current
+    // cycle (non-destructive; leaves the base Budget tab untouched).
+    function tgSetBudget_(argStr) {
+      const s = String(argStr || '').trim();
+      if (!s) {
+        const ctx = buildBudgetContextForChat_();
+        const rows = (ctx.lineSummary || [])
+          .filter(x => (Number(x.budget) || 0) > 0)
+          .map(x => tgMdSafe_(x.line) + '  ' + tgFmtZar_(x.budget));
+        return '*Budgets this cycle*\n' + (rows.join('\n') || '(none set)') +
+               '\n\nSet with: /budget <line> <amount>';
+      }
+      const m = s.match(/^(.*?)[\s=]+(-?[\d\s.,]+)$/);
+      if (!m) return 'Format: /budget <line> <amount>   e.g. /budget Groceries 3500';
+      const query = m[1].trim().toLowerCase();
+      const amount = Number(String(m[2]).replace(/[\s,]/g, ''));
+      if (!isFinite(amount)) return 'Could not read the amount.';
+
+      const names = tgBudgetLineNames_();
+      let line = names.find(n => n.toLowerCase() === query)
+              || names.find(n => n.toLowerCase().indexOf(query) >= 0)
+              || names.find(n => query.indexOf(n.toLowerCase()) >= 0)
+              || m[1].trim();
+
+      const cyc = currentCycle_();
+      const overrides = readTab_(T_OVERRIDES);
+      let found = false;
+      for (const o of overrides) {
+        if (String(o.Cycle || '').slice(0, 10) === cyc.start && String(o.Line || '') === line) {
+          o.Amount = amount; found = true; break;
+        }
+      }
+      if (!found) overrides.push({ Cycle: cyc.start, Line: line, Amount: amount });
+      overwriteTab_(T_OVERRIDES, overrides);
+
+      return '✓ ' + tgMdSafe_(line) + ' set to ' + tgFmtZar_(amount) + ' for this cycle (' + cyc.start + ').';
     }
 
     // WhatsApp Cloud API webhook handler. Meta POSTs message events here in
