@@ -463,8 +463,10 @@
 
       // Telegram webhook calls don't carry our SHARED_TOKEN — they're
       // POSTed by Telegram's servers. Detect by the Telegram update shape
-      // (presence of update_id + message) and route to the bot handler.
-      if (body.update_id && body.message) {
+      // (update_id + a message OR a callback_query from an inline button) and
+      // route to the bot handler. callback_query has NO top-level message, so
+      // it must be matched explicitly or button taps get rejected as bad-token.
+      if (body.update_id && (body.message || body.callback_query)) {
         return handleTelegramUpdate_(body);
       }
 
@@ -1932,6 +1934,18 @@
           return noOp;
         }
 
+        // ---- Dedup: Apps Script's web-app response is a 302 that Telegram
+        // treats as a failed delivery, so it RE-SENDS the same update many
+        // times → duplicate replies. Each update has a unique update_id;
+        // remember the ones we've handled (10 min) and ignore repeats. This is
+        // the standard fix for Telegram-on-Apps-Script double-fires.
+        if (update.update_id != null) {
+          const seenKey = 'tg_seen_' + update.update_id;
+          const cache = CacheService.getScriptCache();
+          if (cache.get(seenKey)) return noOp;   // already handled this update
+          cache.put(seenKey, '1', 600);
+        }
+
         // ---- Inline-button taps arrive as callback_query, not message ----
         if (update.callback_query) {
           const cq = update.callback_query;
@@ -1973,15 +1987,8 @@
         if (!text) return noOp;
         const lower = text.toLowerCase();
 
-        if (lower === '/help' || lower === '/start@') {
-          sendTelegramMessage_(botToken, chatId,
-            '*CapiTracker*\n' +
-            '/cashflow — where you stand this cycle\n' +
-            '/review — tag uncategorised transactions\n' +
-            '/budget — show this cycle\'s budgets\n' +
-            '/budget <line> <amount> — set one\n' +
-            'Share a Capitec *.csv* to import it.\n' +
-            'Or just ask, e.g. "how much left on groceries?"');
+        if (lower === '/help' || lower === '/menu' || lower === '/start@' || tgIsGreeting_(lower)) {
+          sendTelegramMessage_(botToken, chatId, tgMenu_());
           return noOp;
         }
         if (lower === '/cashflow' || lower === '/left' || lower === '/flow') {
@@ -2038,6 +2045,31 @@
     // user line names) so an underscore/asterisk in the data can't break a send.
     function tgMdSafe_(s) {
       return String(s || '').replace(/[_*`\[\]]/g, ' ').trim();
+    }
+
+    // Friendly menu sent on /help, /menu, or a plain greeting (hi, howzit…).
+    function tgMenu_() {
+      return [
+        '👋 Howzit! I\'m *CapiTracker*.',
+        '',
+        '💸 /cashflow — where you stand this cycle',
+        '🏷 /review — tag uncategorised transactions',
+        '📊 /budget — show budgets  _( /budget Groceries 3500 to set )_',
+        '📥 Share a Capitec *.csv* — I\'ll import it',
+        '',
+        'Or just ask, e.g. "how much left on groceries?"',
+      ].join('\n');
+    }
+
+    // True when the whole message is just a greeting, so we show the menu
+    // instead of sending it to the AI. "hi how much left?" still goes to Gemini.
+    function tgIsGreeting_(lower) {
+      const greets = ['hi', 'hello', 'hey', 'yo', 'howzit', 'hola', 'hallo', 'haai',
+        'sup', 'hiya', 'heita', 'aweh', 'oi', 'morning', 'goeie', 'dumela'];
+      const t = String(lower || '').replace(/[!.,?]+/g, '').trim();
+      if (!t) return false;
+      const words = t.split(/\s+/);
+      return words.length <= 2 && greets.indexOf(words[0]) >= 0;
     }
 
     // ZAR, en-ZA thousands with a space, no decimals. Sign preserved (- = spend).
